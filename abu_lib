@@ -4056,7 +4056,6 @@ local function buildBuiltinWidgets()
         end,
     })
 end
-buildBuiltinWidgets()
 
 -- Register a widget definition (host API)
 function WidgetEngine.register(def)
