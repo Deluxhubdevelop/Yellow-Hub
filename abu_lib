@@ -4069,6 +4069,9 @@ function WidgetEngine.register(def)
     return def.Id
 end
 
+-- Build built-in widgets only after register is available
+buildBuiltinWidgets()
+
 function WidgetEngine.get(id)
     return WidgetEngine.registry[id]
 end
