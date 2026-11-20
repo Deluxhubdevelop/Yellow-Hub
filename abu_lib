@@ -1,0 +1,4695 @@
+--[[
+    LIMUI — Fluid Glass Universal UI Library
+    ========================================
+
+    A universal, game-agnostic Roblox UI framework built for executor-loaded
+    scripts. Fluid Glass aesthetics, centralized Motion Engine, Theme Engine
+    with Theme Studio, Window Manager, sidebar navigation, search/command
+    palette, notifications, widgets dashboard, minimize modes, persistence.
+
+    Public syntax:
+
+        local UI = loadstring(game:HttpGet("URL"))()
+        local W = UI:Window({ Title = "Hub" })
+        local T = W:Tab("Principal")
+        T:Button("Executar", function() print("ok") end)
+
+    Advanced table form:
+
+        T:Button({ Title = "Executar", Description = "...", Callback = function() end })
+
+    No game-specific logic is hardcoded. The host script owns tabs, actions
+    and data. LimUI owns rendering, interaction, appearance and animation.
+
+    Version: 3.0.0
+--]]
+
+local limui = {}
+limui.Version = "3.0.0"
+limui.Build = "fluid-glass-universal"
+
+--==============================================================================
+--  FORWARD DECLARATIONS (to avoid scope issues)
+--==============================================================================
+
+local Theme, Motion, Glass, Host, Overlay, Input, WindowMgr, Persist, Icons
+local Notify, Search, ThemeStudio, WidgetEngine, Favorites, TooltipSystem
+local Control, Components, Window, Tab, Section
+
+--==============================================================================
+--  SERVICES & ENVIRONMENT DETECTION
+--==============================================================================
+
+local function safeGetService(name)
+    local ok, svc = pcall(function() return game:GetService(name) end)
+    return ok and svc or nil
+end
+
+local Players        = safeGetService("Players")
+local TweenService   = safeGetService("TweenService")
+local UserInputService = safeGetService("UserInputService")
+local RunService     = safeGetService("RunService")
+local TextService    = safeGetService("TextService")
+local GuiService     = safeGetService("GuiService")
+local CoreGui        = safeGetService("CoreGui")
+local HttpService    = safeGetService("HttpService")
+local Workspace      = safeGetService("Workspace")
+
+local LocalPlayer = Players and Players.LocalPlayer or nil
+
+local Capabilities = {
+    TweenService   = TweenService ~= nil,
+    UserInput      = UserInputService ~= nil,
+    RunService     = RunService ~= nil,
+    TextService    = TextService ~= nil,
+    GuiService     = GuiService ~= nil,
+    HttpService    = HttpService ~= nil,
+    PlayerGui      = (LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")) ~= nil,
+    gethui         = (typeof(gethui) == "function"),
+    protect_gui    = (typeof(protect_gui) == "function"),
+    readfile       = (typeof(readfile) == "function"),
+    writefile      = (typeof(writefile) == "function"),
+    isfile         = (typeof(isfile) == "function"),
+    makefolder     = (typeof(makefolder) == "function"),
+    delfile        = (typeof(delfile) == "function"),
+    clipboard      = (typeof(setclipboard) == "function") or (typeof(copy) == "function"),
+}
+
+local IsStudio = (RunService and RunService:IsStudio()) or false
+local IsMobile = false
+if UserInputService then
+    pcall(function() IsMobile = UserInputService.TouchEnabled end)
+end
+
+--==============================================================================
+--  UTILITIES
+--==============================================================================
+
+local Utils = {}
+
+function Utils.call(fn, ...)
+    if type(fn) ~= "function" then return nil end
+    local ok, res = pcall(fn, ...)
+    if not ok then warn("[limui] callback error: " .. tostring(res)) end
+    return res
+end
+
+function Utils.make(className, props, parent)
+    local ok, obj = pcall(function()
+        local o = Instance.new(className)
+        if props then
+            for k, v in pairs(props) do
+                pcall(function() o[k] = v end)
+            end
+        end
+        if parent then o.Parent = parent end
+        return o
+    end)
+    return ok and obj or nil
+end
+
+function Utils.corner(obj, radius)
+    if not obj then return end
+    return Utils.make("UICorner", { CornerRadius = UDim.new(0, radius or 8) }, obj)
+end
+
+function Utils.stroke(obj, color, transparency, thickness)
+    if not obj then return end
+    return Utils.make("UIStroke", {
+        Color = color or Color3.fromRGB(255,255,255),
+        Thickness = thickness or 1,
+        Transparency = transparency or 0,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+    }, obj)
+end
+
+function Utils.gradient(obj, color, rotation)
+    if not obj then return end
+    return Utils.make("UIGradient", { Color = color, Rotation = rotation or 0 }, obj)
+end
+
+function Utils.list(parent, padding, sortOrder)
+    return Utils.make("UIListLayout", {
+        Padding = UDim.new(0, padding or 6),
+        SortOrder = sortOrder or Enum.SortOrder.LayoutOrder,
+    }, parent)
+end
+
+function Utils.pad(parent, t, l, b, r)
+    return Utils.make("UIPadding", {
+        PaddingTop = UDim.new(0, t or 0),
+        PaddingLeft = UDim.new(0, l or 0),
+        PaddingBottom = UDim.new(0, b or 0),
+        PaddingRight = UDim.new(0, r or 0),
+    }, parent)
+end
+
+function Utils.scale(obj, s)
+    return Utils.make("UIScale", { Scale = s or 1 }, obj)
+end
+
+function Utils.hex(hexStr)
+    hexStr = tostring(hexStr):gsub("#", "")
+    local r = tonumber(hexStr:sub(1,2), 16) or 255
+    local g = tonumber(hexStr:sub(3,4), 16) or 255
+    local b = tonumber(hexStr:sub(5,6), 16) or 255
+    return Color3.fromRGB(r, g, b)
+end
+
+function Utils.colorToHex(c)
+    return string.format("#%02X%02X%02X",
+        math.floor(c.R * 255 + 0.5),
+        math.floor(c.G * 255 + 0.5),
+        math.floor(c.B * 255 + 0.5))
+end
+
+function Utils.lerp(a, b, t) return a + (b - a) * t end
+
+function Utils.clamp(v, lo, hi) return math.min(math.max(v, lo), hi) end
+
+function Utils.deepCopy(t)
+    if type(t) ~= "table" then return t end
+    local out = {}
+    for k, v in pairs(t) do
+        if type(v) == "table" then out[k] = Utils.deepCopy(v) else out[k] = v end
+    end
+    return out
+end
+
+function Utils.id(prefix)
+    prefix = prefix or "id"
+    return prefix .. "-" .. tostring(math.random(100000, 999999)) .. "-" .. tostring(tick()):sub(-5)
+end
+
+function Utils.normalizeText(s)
+    if type(s) ~= "string" then return "" end
+    local lower = string.lower(s)
+    local repl = {["á"]="a",["à"]="a",["ã"]="a",["â"]="a",["é"]="e",["ê"]="e",
+                  ["í"]="i",["ó"]="o",["ô"]="o",["õ"]="o",["ú"]="u",["ç"]="c"}
+    for o, r in pairs(repl) do lower = lower:gsub(o, r) end
+    return lower
+end
+
+function Utils.set(obj, prop, val)
+    if not obj then return false end
+    local ok = pcall(function() obj[prop] = val end)
+    return ok
+end
+
+-- Color3 -> HSV (h in [0,1), s/v in [0,1])
+function Utils.rgbToHsv(c)
+    local r, g, b = c.R, c.G, c.B
+    local max = math.max(r, g, b)
+    local min = math.min(r, g, b)
+    local d = max - min
+    local h = 0
+    if d > 0 then
+        if max == r then
+            h = ((g - b) / d) % 6
+        elseif max == g then
+            h = (b - r) / d + 2
+        else
+            h = (r - g) / d + 4
+        end
+        h = h / 6
+    end
+    local s = max > 0 and (d / max) or 0
+    return h, s, max
+end
+
+-- HSV -> Color3
+function Utils.hsvToRgb(h, s, v)
+    h = h % 1
+    s = Utils.clamp(s, 0, 1)
+    v = Utils.clamp(v, 0, 1)
+    local i = math.floor(h * 6)
+    local f = h * 6 - i
+    local p = v * (1 - s)
+    local q = v * (1 - f * s)
+    local t = v * (1 - (1 - f) * s)
+    local r, g, b
+    if i == 0 then r, g, b = v, t, p
+    elseif i == 1 then r, g, b = q, v, p
+    elseif i == 2 then r, g, b = p, v, t
+    elseif i == 3 then r, g, b = p, q, v
+    elseif i == 4 then r, g, b = t, p, v
+    else r, g, b = v, p, q end
+    return Color3.fromRGB(r * 255, g * 255, b * 255)
+end
+
+function Utils.rgbToBytes(c)
+    return math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5)
+end
+
+function Utils.bytesToRgb(r, g, b)
+    return Color3.fromRGB(
+        Utils.clamp(math.floor(r or 0), 0, 255),
+        Utils.clamp(math.floor(g or 0), 0, 255),
+        Utils.clamp(math.floor(b or 0), 0, 255)
+    )
+end
+
+-- Argument normalizer for simplified + advanced syntax
+-- Returns normalized options table and callback
+-- argMap: list of key names for positional args (e.g. {"Min","Max","Step","Default","Suffix"})
+function Utils.normalizeArgs(first, second, ...)
+    local argMap = {...}
+    local opts, cb
+    if type(first) == "string" then
+        opts = {}
+        cb = second
+        if type(cb) ~= "function" then cb = nil end
+        opts.Title = first
+        opts.Id = Utils.id(argMap.component or "ctrl")
+        opts.Description = opts.Description or ""
+        -- Map additional positional args
+        local n = select('#', ...)
+        -- second is already consumed as callback, remaining are in argMap
+    elseif type(first) == "table" then
+        opts = Utils.deepCopy(first)
+        cb = second
+        if type(cb) ~= "function" then cb = nil end
+        if not opts.Id then opts.Id = Utils.id(argMap.component or "ctrl") end
+    else
+        opts = { Title = tostring(first), Id = Utils.id(argMap.component or "ctrl") }
+        cb = second
+    end
+    opts.Callback = cb
+    return opts, cb
+end
+
+--==============================================================================
+--  THEME ENGINE
+--==============================================================================
+
+Theme = {}
+Theme.Presets = {}
+Theme.Current = nil
+Theme.Quality = "Balanced"
+Theme.Motion = "Elegant"
+Theme.Glass = "Frosted"
+
+local tokenDefaults = {
+    palette = {
+        background   = Color3.fromRGB(11, 15, 23),
+        panel        = Color3.fromRGB(24, 32, 46),
+        surface      = Color3.fromRGB(34, 44, 60),
+        overlay      = Color3.fromRGB(0, 0, 0),
+        accent       = Color3.fromRGB(139, 176, 255),
+        accentDark   = Color3.fromRGB(80, 120, 200),
+        border       = Color3.fromRGB(60, 75, 95),
+        borderLight  = Color3.fromRGB(90, 110, 135),
+        hover        = Color3.fromRGB(45, 58, 78),
+        active       = Color3.fromRGB(55, 70, 92),
+        success      = Color3.fromRGB(120, 220, 150),
+        warning      = Color3.fromRGB(240, 190, 90),
+        error        = Color3.fromRGB(240, 100, 100),
+        text         = Color3.fromRGB(235, 240, 245),
+        textMuted    = Color3.fromRGB(150, 165, 180),
+        icon         = Color3.fromRGB(170, 185, 200),
+        placeholder  = Color3.fromRGB(110, 125, 140),
+    },
+    glass = {
+        material     = "Frosted",
+        opacity      = 0.85,
+        panelOpacity = 0.92,
+        glow         = 0.18,
+        reflection   = 0.12,
+        borderWidth  = 1.2,
+        shadow       = 0.45,
+    },
+    shape = {
+        radiusWindow = 20,
+        radiusCard   = 12,
+        radiusButton = 10,
+        radiusPill   = 999,
+        borderWidth  = 1,
+        spacing      = 10,
+        density      = 1,
+        sidebarWidth = 220,
+    },
+    typography = {
+        font  = Enum.Font.Gotham,
+        bold  = Enum.Font.GothamBold,
+        scale = 1,
+        title = 20,
+        subtitle = 14,
+        body  = 13,
+        small = 11,
+        caption = 10,
+    },
+    motion = {
+        preset  = "Elegant",
+        scale   = 1,
+        instant = false,
+    },
+    window = {
+        mode       = "Floating",
+        resizable  = true,
+        draggable  = true,
+        remember   = true,
+        safeArea   = 12,
+        minSize    = UDim2.fromOffset(500, 320),
+        maxSize    = UDim2.fromOffset(1200, 800),
+    },
+    minimize = {
+        mode       = "CompactBar",
+        iconAsset  = "",
+    },
+    accessibility = {
+        reducedMotion = false,
+        largeTouch    = false,
+        highContrast  = false,
+    },
+}
+
+function Theme.newTheme(overrides)
+    local t = Utils.deepCopy(tokenDefaults)
+    if overrides then
+        for section, vals in pairs(overrides) do
+            if type(vals) == "table" and t[section] then
+                for k, v in pairs(vals) do t[section][k] = v end
+            else
+                t[section] = vals
+            end
+        end
+    end
+    return t
+end
+
+Theme.Presets["Obsidian Glass"] = Theme.newTheme({
+    palette = { background = Color3.fromRGB(11, 15, 23), panel = Color3.fromRGB(29, 39, 53),
+                surface = Color3.fromRGB(40, 50, 66), accent = Color3.fromRGB(146, 182, 255),
+                text = Color3.fromRGB(235, 240, 245), textMuted = Color3.fromRGB(150, 165, 180) },
+    glass = { material = "Deep", opacity = 0.88, glow = 0.22 },
+})
+
+Theme.Presets["Frosted Light"] = Theme.newTheme({
+    palette = { background = Color3.fromRGB(233, 241, 251), panel = Color3.fromRGB(214, 228, 243),
+                surface = Color3.fromRGB(226, 236, 248), accent = Color3.fromRGB(98, 141, 219),
+                text = Color3.fromRGB(30, 40, 60), textMuted = Color3.fromRGB(90, 105, 125) },
+    glass = { material = "Frosted", opacity = 0.94, glow = 0.10 },
+})
+
+Theme.Presets["Graphite"] = Theme.newTheme({
+    palette = { background = Color3.fromRGB(17, 19, 23), panel = Color3.fromRGB(40, 45, 52),
+                surface = Color3.fromRGB(50, 56, 64), accent = Color3.fromRGB(215, 222, 232),
+                text = Color3.fromRGB(225, 230, 238), textMuted = Color3.fromRGB(150, 158, 168) },
+    glass = { material = "Clear", opacity = 0.90 },
+})
+
+Theme.Presets["Aurora"] = Theme.newTheme({
+    palette = { background = Color3.fromRGB(20, 19, 38), panel = Color3.fromRGB(45, 40, 70),
+                surface = Color3.fromRGB(55, 50, 82), accent = Color3.fromRGB(85, 231, 210),
+                text = Color3.fromRGB(240, 245, 250), textMuted = Color3.fromRGB(160, 165, 190) },
+    glass = { material = "Prismatic", opacity = 0.86, glow = 0.30 },
+})
+
+Theme.Presets["Ember"] = Theme.newTheme({
+    palette = { background = Color3.fromRGB(26, 20, 23), panel = Color3.fromRGB(52, 36, 42),
+                surface = Color3.fromRGB(62, 46, 52), accent = Color3.fromRGB(255, 177, 132),
+                text = Color3.fromRGB(245, 235, 235), textMuted = Color3.fromRGB(170, 140, 145) },
+    glass = { material = "Deep", opacity = 0.87, glow = 0.20 },
+})
+
+Theme.Presets["Monochrome"] = Theme.newTheme({
+    palette = { background = Color3.fromRGB(13, 13, 14), panel = Color3.fromRGB(41, 41, 44),
+                surface = Color3.fromRGB(52, 52, 56), accent = Color3.fromRGB(241, 241, 242),
+                text = Color3.fromRGB(241, 241, 242), textMuted = Color3.fromRGB(160, 160, 164) },
+    glass = { material = "Solid", opacity = 1.0, glow = 0.0 },
+})
+
+function Theme.getPreset(name)
+    return Theme.Presets[name] or Theme.Presets["Obsidian Glass"]
+end
+
+function Theme.apply(themeTable)
+    Theme.Current = type(themeTable) == "string" and Theme.getPreset(themeTable) or Theme.newTheme(themeTable)
+    Theme.Glass = Theme.Current.glass.material
+    Theme.Motion = Theme.Current.motion.preset
+    Theme.Quality = Theme.Current.motion.instant and "Eco" or Theme.Quality
+end
+
+Theme.apply("Obsidian Glass")
+
+--==============================================================================
+--  THEME PROPAGATION REGISTRY
+--  Components register theme-aware parts here so a theme swap repaints
+--  every existing element without rebuilding the UI.
+--==============================================================================
+
+Theme.parts = {}
+
+local function themePart(instance, role, extra)
+    if not instance then return end
+    Theme.parts[instance] = { role = role, extra = extra or {} }
+end
+
+local function clearThemeParts(instance)
+    Theme.parts[instance] = nil
+end
+
+-- role resolver: returns the color a themed part should use for the role
+local function roleColor(role, extra)
+    local t = Theme.Current
+    local p = t.palette
+    if role == "window" then return p.background end
+    if role == "panel" then return p.panel end
+    if role == "surface" then return p.surface end
+    if role == "accent" then return p.accent end
+    if role == "border" then return p.border end
+    if role == "text" then return p.text end
+    if role == "muted" then return p.textMuted end
+    if role == "icon" then return p.icon end
+    if role == "hover" then return p.hover end
+    if role == "active" then return p.active end
+    if role == "placeholder" then return p.placeholder end
+    if role == "success" then return p.success end
+    if role == "warning" then return p.warning end
+    if role == "error" then return p.error end
+    if role == "track" then return p.border end
+    if role == "knob" then return Color3.fromRGB(255,255,255) end
+    return p.surface
+end
+
+function Theme.repaint()
+    local t = Theme.Current
+    for instance, part in pairs(Theme.parts) do
+        if instance and instance.Parent then
+            local c = roleColor(part.role, part.extra)
+            if part.role == "text" or part.role == "muted" or part.role == "icon" then
+                Utils.set(instance, "TextColor3", c)
+            elseif part.role == "placeholder" then
+                Utils.set(instance, "PlaceholderColor3", c)
+            else
+                Utils.set(instance, "BackgroundColor3", c)
+            end
+            if part.extra.stroke then
+                local stroke = instance:FindFirstChildOfClass("UIStroke")
+                if stroke then Utils.set(stroke, "Color", roleColor(part.extra.stroke, part.extra)) end
+            end
+        else
+            Theme.parts[instance] = nil
+        end
+    end
+    -- Corner radii
+    for instance, part in pairs(Theme.parts) do
+        local radius = part.extra.radius
+        if radius then
+            local corner = instance:FindFirstChildOfClass("UICorner")
+            if corner then Utils.set(corner, "CornerRadius", UDim.new(0, radius)) end
+        end
+    end
+end
+
+-- Propagate theme changes to all registered windows and controls
+function Theme.propagate()
+    Theme.repaint()
+    for _, w in pairs(WindowMgr.windows) do
+        if w.refreshTheme then w:refreshTheme() end
+    end
+    -- Re-apply state-dependent colors (toggle track, checkbox box, etc.)
+    for _, c in pairs(Control.controls) do
+        if c.themeHook then Utils.call(c.themeHook) end
+    end
+end
+
+--==============================================================================
+--  MOTION ENGINE
+--==============================================================================
+
+Motion = {}
+Motion.active = {}
+
+local motionDurations = {
+    Instant    = 0.09,
+    Micro      = 0.14,
+    Standard   = 0.20,
+    Navigation = 0.28,
+    Emphasis   = 0.36,
+    Showcase   = 0.50,
+}
+
+local easingPresets = {
+    Elegant    = { Enum.EasingStyle.Quart,   Enum.EasingDirection.Out },
+    Dynamic    = { Enum.EasingStyle.Back,    Enum.EasingDirection.Out },
+    Instant    = { Enum.EasingStyle.Linear,  Enum.EasingDirection.Out },
+    SoftSpring = { Enum.EasingStyle.Back,    Enum.EasingDirection.Out },
+    Reduced    = { Enum.EasingStyle.Linear,  Enum.EasingDirection.Out },
+}
+
+function Motion.duration(className)
+    if Theme.Current and Theme.Current.accessibility and Theme.Current.accessibility.reducedMotion then
+        return 0.02
+    end
+    local scale = Theme.Current and Theme.Current.motion.scale or 1
+    local base = motionDurations[className] or motionDurations.Standard
+    return base * scale
+end
+
+function Motion.easing(className)
+    local preset = Theme.Current and Theme.Current.motion.preset or "Elegant"
+    local e = easingPresets[preset] or easingPresets.Elegant
+    return TweenInfo.new(Motion.duration(className or "Standard"), e[1], e[2])
+end
+
+function Motion.cancel(instance)
+    if not instance then return end
+    local ent = Motion.active[instance]
+    if ent then
+        if ent.tween then pcall(function() ent.tween:Cancel() end) end
+        if ent.conn then pcall(function() ent.conn:Disconnect() end) end
+        Motion.active[instance] = nil
+    end
+end
+
+function Motion.cancelAll()
+    for inst, _ in pairs(Motion.active) do Motion.cancel(inst) end
+end
+
+function Motion.animate(instance, props, dur, style, dir, cb)
+    if not instance or not TweenService then return nil end
+    Motion.cancel(instance)
+    local info = TweenInfo.new(
+        dur or Motion.duration("Standard"),
+        style or Enum.EasingStyle.Quart,
+        dir or Enum.EasingDirection.Out
+    )
+    local tween = TweenService:Create(instance, info, props)
+    local conn
+    conn = tween.Completed:Connect(function()
+        if Motion.active[instance] and Motion.active[instance].conn == conn then
+            Motion.active[instance] = nil
+        end
+        if cb then Utils.call(cb) end
+    end)
+    Motion.active[instance] = { tween = tween, conn = conn }
+    tween:Play()
+    return tween
+end
+
+function Motion.hover(instance, targetColor, baseColor)
+    if Theme.Current and Theme.Current.accessibility and Theme.Current.accessibility.reducedMotion then return end
+    instance.MouseEnter:Connect(function()
+        if not instance or not instance.Parent then return end
+        Motion.animate(instance, { BackgroundColor3 = targetColor }, Motion.duration("Micro"))
+    end)
+    instance.MouseLeave:Connect(function()
+        if not instance or not instance.Parent then return end
+        Motion.animate(instance, { BackgroundColor3 = baseColor }, Motion.duration("Micro"))
+    end)
+end
+
+--==============================================================================
+--  GLASS ENGINE
+--==============================================================================
+
+Glass = {}
+
+function Glass.material(name)
+    name = name or Theme.Glass
+    Theme.Glass = name
+    if Theme.Current then Theme.Current.glass.material = name end
+    Theme.propagate()
+end
+
+local function glassFrameStyle(material)
+    local styles = {
+        Clear    = { opacity = 0.92, glow = 0.08, reflection = 0.06, border = 0.25 },
+        Frosted  = { opacity = 0.85, glow = 0.18, reflection = 0.12, border = 0.35 },
+        Deep     = { opacity = 0.78, glow = 0.28, reflection = 0.20, border = 0.45 },
+        Prismatic= { opacity = 0.82, glow = 0.35, reflection = 0.15, border = 0.30 },
+        Solid    = { opacity = 1.00, glow = 0.00, reflection = 0.00, border = 0.50 },
+    }
+    return styles[material] or styles.Frosted
+end
+
+function Glass.applyWindow(frame, opts)
+    opts = opts or {}
+    local t = Theme.Current
+    local p = t.palette
+    local g = t.glass
+    local s = t.shape
+    local style = glassFrameStyle(g.material)
+
+    Utils.set(frame, "BackgroundColor3", p.background)
+    Utils.set(frame, "BackgroundTransparency", opts.transparency or style.opacity)
+    Utils.set(frame, "BorderSizePixel", 0)
+    Utils.corner(frame, opts.radius or s.radiusWindow)
+    Utils.stroke(frame, opts.borderColor or p.border, opts.borderTransparency or style.border, g.borderWidth)
+
+    -- Edge light (inner glow)
+    local glow = Utils.make("Frame", {
+        Name = "GlassEdge",
+        Position = UDim2.fromOffset(1,1),
+        Size = UDim2.new(1,-2,1,-2),
+        BackgroundColor3 = Color3.fromRGB(255,255,255),
+        BackgroundTransparency = 0.94 - (style.glow * 0.3),
+        BorderSizePixel = 0,
+        ZIndex = (frame.ZIndex or 10) + 1,
+    }, frame)
+    Utils.corner(glow, opts.radius or s.radiusWindow)
+
+    -- Specular reflection (top)
+    local spec = Utils.make("Frame", {
+        Name = "Specular",
+        Position = UDim2.fromOffset(0,0),
+        Size = UDim2.new(1,0,0,1),
+        BackgroundColor3 = Color3.fromRGB(255,255,255),
+        BackgroundTransparency = 0.80 - (style.reflection * 0.3),
+        BorderSizePixel = 0,
+        ZIndex = (frame.ZIndex or 10) + 2,
+    }, frame)
+
+    return { glow = glow, specular = spec }
+end
+
+function Glass.applyPanel(frame, opts)
+    opts = opts or {}
+    local t = Theme.Current
+    local p = t.palette
+    local g = t.glass
+    local style = glassFrameStyle(g.material)
+    Utils.set(frame, "BackgroundColor3", opts.color or p.panel)
+    Utils.set(frame, "BackgroundTransparency", opts.transparency or style.opacity)
+    Utils.set(frame, "BorderSizePixel", 0)
+    Utils.corner(frame, opts.radius or t.shape.radiusCard)
+    if opts.stroke ~= false then
+        Utils.stroke(frame, opts.strokeColor or p.border, opts.strokeTransparency or style.border, 1)
+    end
+end
+
+function Glass.applyButton(btn, opts)
+    opts = opts or {}
+    local t = Theme.Current
+    local p = t.palette
+    Utils.set(btn, "BackgroundColor3", opts.color or p.surface)
+    Utils.set(btn, "BackgroundTransparency", opts.transparency or 0)
+    Utils.corner(btn, opts.radius or t.shape.radiusButton)
+    Utils.stroke(btn, opts.strokeColor or p.border, 0.3, 1)
+end
+
+--==============================================================================
+--  HOST ADAPTER
+--==============================================================================
+
+Host = {}
+
+function Host.getContainer()
+    if Capabilities.gethui then
+        local ok, hui = pcall(gethui)
+        if ok and hui then return hui end
+    end
+    if LocalPlayer then
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if pg then return pg end
+        pg = LocalPlayer:WaitForChild("PlayerGui", 5)
+        if pg then return pg end
+    end
+    if CoreGui then return CoreGui end
+    return nil
+end
+
+function Host.protect(gui)
+    if Capabilities.protect_gui then pcall(protect_gui, gui) end
+end
+
+--==============================================================================
+--  OVERLAY MANAGER
+--==============================================================================
+
+Overlay = {}
+Overlay.topGui = nil
+Overlay.zBase = 100
+
+function Overlay.init(container)
+    local og = Utils.make("ScreenGui", {
+        Name = "LimUI_Overlay",
+        ResetOnSpawn = false,
+        IgnoreGuiInset = true,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    }, container)
+    Host.protect(og)
+    Overlay.topGui = og
+    return og
+end
+
+function Overlay.z(level)
+    return Overlay.zBase + (level or 0)
+end
+
+--==============================================================================
+--  INPUT MANAGER
+--==============================================================================
+
+Input = {}
+Input.drags = {}
+Input.hotkeys = {}
+
+local dragConnection = nil
+local releaseConnection = nil
+local activeDragGui = nil
+
+function Input.beginDrag(gui, handle, onMove, onEnd)
+    Input.endDrag()
+    activeDragGui = gui
+    Input.drags[gui] = {
+        active = true,
+        startMouse = UserInputService and UserInputService:GetMouseLocation() or Vector2.new(0,0),
+        obj = gui,
+        onMove = onMove,
+        onEnd = onEnd,
+    }
+    if not dragConnection and UserInputService then
+        dragConnection = UserInputService.InputChanged:Connect(function(input, processed)
+            if processed or not activeDragGui then return end
+            local d = Input.drags[activeDragGui]
+            if not d or not d.active then return end
+            local mouse = UserInputService:GetMouseLocation()
+            local delta = mouse - d.startMouse
+            if d.onMove then d.onMove(delta) end
+            d.startMouse = mouse
+        end)
+        releaseConnection = UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                Input.endDrag()
+            end
+        end)
+    end
+end
+
+function Input.endDrag()
+    if activeDragGui then
+        local d = Input.drags[activeDragGui]
+        if d and d.onEnd then d.onEnd() end
+        Input.drags[activeDragGui] = nil
+        activeDragGui = nil
+    end
+    if dragConnection then dragConnection:Disconnect(); dragConnection = nil end
+    if releaseConnection then releaseConnection:Disconnect(); releaseConnection = nil end
+end
+
+--==============================================================================
+--  WINDOW MANAGER
+--==============================================================================
+
+WindowMgr = {}
+WindowMgr.windows = {}
+WindowMgr.focused = nil
+
+function WindowMgr.register(window)
+    WindowMgr.windows[window.id] = window
+end
+
+function WindowMgr.focus(window)
+    WindowMgr.focused = window
+end
+
+function WindowMgr.get(id)
+    return WindowMgr.windows[id]
+end
+
+function WindowMgr.destroyAll()
+    for id, w in pairs(WindowMgr.windows) do pcall(function() w:Destroy() end) end
+    WindowMgr.windows = {}
+end
+
+--==============================================================================
+--  PERSISTENCE
+--==============================================================================
+
+Persist = {}
+Persist.enabled = false
+Persist.namespace = "limui"
+
+function Persist.setup(namespace, auto)
+    Persist.namespace = namespace or "limui"
+    Persist.enabled = auto ~= false and Capabilities.writefile and Capabilities.readfile and Capabilities.HttpService
+    return Persist.enabled
+end
+
+function Persist.path(key)
+    return Persist.namespace .. "/" .. key .. ".json"
+end
+
+function Persist.read(key)
+    if not Persist.enabled or not Capabilities.readfile or not Capabilities.HttpService then return nil end
+    local p = Persist.path(key)
+    if Capabilities.isfile then
+        local ok, exists = pcall(function() return isfile(p) end)
+        if not ok or not exists then return nil end
+    end
+    local ok, data = pcall(readfile, p)
+    if not ok then return nil end
+    local ok2, decoded = pcall(function() return HttpService:JSONDecode(data) end)
+    if not ok2 then return nil end
+    return decoded
+end
+
+function Persist.write(key, data)
+    if not Persist.enabled or not Capabilities.writefile or not Capabilities.HttpService then return false end
+    local ok, encoded = pcall(function() return HttpService:JSONEncode(data) end)
+    if not ok then return false end
+    local p = Persist.path(key)
+    if Capabilities.makefolder then pcall(makefolder, Persist.namespace) end
+    local ok2 = pcall(writefile, p, encoded)
+    return ok2
+end
+
+function Persist.delete(key)
+    if not Persist.enabled or not Capabilities.delfile then return false end
+    return pcall(delfile, Persist.path(key))
+end
+
+--==============================================================================
+--  ICON SYSTEM
+--==============================================================================
+
+Icons = {}
+
+local glyphs = {
+    home     = "", user     = "", car      = "", house    = "",
+    smile    = "", animation= "", map      = "", settings = "",
+    users    = "", clock    = "󰔚", game     = "", id       = "󰁯",
+    expand   = "󰕱", play     = "󰐊", stop     = "󰓛", gear     = "",
+    bell     = "󰂚", search   = "󰥔", plus     = "󰐖", minus    = "󰈒",
+    check    = "󰱒", x        = "󰅖", chevronR = "󰅂", chevronL = "󰅀",
+    star     = "󰼭", lock     = "󰍁", unlock   = "󰌌", tag      = "󰓯",
+    layout   = "󰘕", color    = "", key      = "󰌆", slider   = "󰒓",
+    dropdown = "󰇚", text     = "󰈙", paragraph= "󰈬", image    = "󰻞",
+    chart    = "󰒓", folder   = "󰉋", trash    = "󰋳", save     = "󰆓",
+    load     = "󰎔", sync     = "󰔟", info     = "󰋼", help     = "󰠆",
+    warning  = "󰠻", success  = "󰄬", error    = "󰅚", close    = "󰅖",
+    minimize = "󰄾", maximize = "󰥌", dash     = "󰊓",
+}
+
+function Icons.get(kind, size, color)
+    size = size or 20
+    color = color or Color3.fromRGB(170,185,200)
+    if type(kind) == "string" and (kind:find("rbxassetid://") or kind:find("^%d+$")) then
+        return { kind = "image", asset = kind }
+    end
+    local glyph = glyphs[kind] or kind or "?"
+    return { kind = "glyph", glyph = glyph, size = size, color = color }
+end
+
+function Icons.draw(parent, kind, size, color)
+    local spec = Icons.get(kind, size, color)
+    local holder = Utils.make("Frame", {
+        Size = UDim2.fromOffset(size, size),
+        BackgroundTransparency = 1,
+        ClipsDescendants = true,
+    }, parent)
+    if spec.kind == "image" then
+        Utils.make("ImageLabel", {
+            Size = UDim2.fromScale(1,1),
+            BackgroundTransparency = 1,
+            Image = spec.asset,
+            ScaleType = Enum.ScaleType.Fit,
+        }, holder)
+    else
+        Utils.make("TextLabel", {
+            Size = UDim2.fromScale(1,1),
+            BackgroundTransparency = 1,
+            Text = spec.glyph,
+            TextColor3 = spec.color,
+            Font = Enum.Font.GothamBold,
+            TextSize = spec.size * 0.85,
+        }, holder)
+    end
+    return holder
+end
+
+--==============================================================================
+--  BASE CONTROL
+--==============================================================================
+
+Control = {}
+Control.controls = {}
+
+function Control.new(id, kind, instance, getValue, setValue, opts)
+    opts = opts or {}
+    local c = {
+        id = id, kind = kind, instance = instance,
+        getValue = getValue or function() return nil end,
+        setValue = setValue or function() end,
+        opts = opts,
+        disabled = false, visible = true, destroyed = false,
+    }
+    Control.controls[id] = c
+    if opts.Searchable ~= false then
+        local title = opts.Title or opts.Name or opts.Text or id
+        local kw = opts.Keywords or opts.KeywordsList or opts.Tags or ""
+        if type(kw) == "table" then kw = table.concat(kw, " ") end
+        Search.register({
+            id = "control:" .. id,
+            title = tostring(title),
+            desc = tostring(opts.Description or ""),
+            keywords = tostring(title) .. " " .. tostring(kw),
+            aliases = tostring(opts.Aliases or ""),
+            tabId = opts.__tabId,
+            sectionId = opts.__sectionId,
+            controlId = id,
+            type = kind,
+        })
+    end
+    return c
+end
+
+function Control.get(id) return Control.controls[id] end
+
+function Control:setDisabled(disabled)
+    self.disabled = disabled
+    if self.instance then
+        Utils.set(self.instance, "Active", not disabled)
+        Utils.set(self.instance, "AutoButtonColor", not disabled)
+        local alpha = disabled and 0.5 or 0
+        for _, desc in ipairs(self.instance:GetDescendants()) do
+            if desc:IsA("TextLabel") or desc:IsA("TextButton") or desc:IsA("TextBox") then
+                pcall(function() desc.TextTransparency = alpha end)
+            end
+        end
+    end
+end
+
+function Control:setVisible(visible)
+    self.visible = visible
+    if self.instance then self.instance.Visible = visible end
+end
+
+function Control:setTitle(text)
+    if self.instance and text then
+        for _, desc in ipairs(self.instance:GetDescendants()) do
+            if desc:IsA("TextLabel") and desc.Name == "TitleLabel" then
+                desc.Text = text
+                break
+            end
+        end
+    end
+end
+
+function Control:destroy()
+    if self.destroyed then return end
+    self.destroyed = true
+    Control.controls[self.id] = nil
+    Search.unregister("control:" .. self.id)
+    if self.instance then
+        Motion.cancel(self.instance)
+        pcall(function() self.instance:Destroy() end)
+    end
+end
+
+-- Alias for compatibility
+Control.Destroy = Control.destroy
+
+--==============================================================================
+--  WINDOW CONSTRUCTION
+--==============================================================================
+
+Window = {}
+Window.__index = Window
+
+function Window.new(opts)
+    opts = opts or {}
+    local id = opts.Id or opts.id or Utils.id("window")
+    local container = Host.getContainer()
+    if not container then
+        warn("[limui] no GUI container available")
+        return nil
+    end
+
+    local self = setmetatable({}, Window)
+    self.id = id
+    self.opts = opts
+    self.tabs = {}
+    self.tabOrder = {}
+    self.currentTab = nil
+    self.containers = {}
+    self.minimized = false
+    self.destroyed = false
+    self.title = opts.Title or "LimUI"
+    self.subtitle = opts.Subtitle or ""
+    self.iconAsset = opts.Icon or ""
+
+    -- Theme
+    local themeOpt = opts.Theme
+    if type(themeOpt) == "string" then Theme.apply(themeOpt)
+    elseif type(themeOpt) == "table" then Theme.apply(themeOpt) end
+
+    -- GUI
+    local gui = Utils.make("ScreenGui", {
+        Name = "LimUI_" .. id,
+        ResetOnSpawn = false,
+        IgnoreGuiInset = true,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    }, container)
+    Host.protect(gui)
+    self.gui = gui
+    Utils.scale(gui, 1)
+
+    -- Shadow
+    local shadow = Utils.make("Frame", {
+        Name = "Shadow",
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(800, 540),
+        BackgroundColor3 = Color3.fromRGB(0,0,0),
+        BackgroundTransparency = 0.6,
+        BorderSizePixel = 0,
+        ZIndex = 0,
+    }, gui)
+    Utils.corner(shadow, Theme.Current.shape.radiusWindow)
+    self.shadow = shadow
+
+    -- Main window
+    local main = Utils.make("Frame", {
+        Name = "Main",
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(780, 520),
+        BackgroundColor3 = Theme.Current.palette.background,
+        BorderSizePixel = 0,
+        ClipsDescendants = false,
+        ZIndex = 10,
+    }, gui)
+    Glass.applyWindow(main)
+    self.main = main
+    themePart(main, "window")
+    themePart(header, "panel")
+    themePart(headerBottom, "panel")
+    themePart(sidebar, "panel")
+    themePart(content, "surface")
+
+    -- Topbar
+    local headerHeight = 50
+    local header = Utils.make("Frame", {
+        Name = "Header",
+        Size = UDim2.new(1, 0, 0, headerHeight),
+        BackgroundColor3 = Theme.Current.palette.panel,
+        BorderSizePixel = 0,
+        ClipsDescendants = true,
+        ZIndex = 20,
+    }, main)
+    Utils.corner(header, Theme.Current.shape.radiusWindow)
+    local headerBottom = Utils.make("Frame", {
+        Position = UDim2.new(0,0,1,-16),
+        Size = UDim2.new(1,0,0,16),
+        BackgroundColor3 = Theme.Current.palette.panel,
+        BorderSizePixel = 0,
+        ZIndex = 20,
+    }, header)
+
+    -- Logo / icon area
+    local logoHolder = Utils.make("Frame", {
+        Name = "LogoHolder",
+        Position = UDim2.fromOffset(12, 10),
+        Size = UDim2.fromOffset(30, 30),
+        BackgroundTransparency = 1,
+        ZIndex = 21,
+    }, header)
+    if self.iconAsset and self.iconAsset ~= "" then
+        Utils.make("ImageLabel", {
+            Size = UDim2.fromScale(1,1),
+            BackgroundTransparency = 1,
+            Image = self.iconAsset,
+            ScaleType = Enum.ScaleType.Fit,
+        }, logoHolder)
+    else
+        Icons.draw(logoHolder, "gear", 30, Theme.Current.palette.accent)
+    end
+
+    -- Title
+    local titleLbl = Utils.make("TextLabel", {
+        Name = "TitleLabel",
+        Position = UDim2.fromOffset(52, 8),
+        Size = UDim2.new(1, -260, 0, 22),
+        BackgroundTransparency = 1,
+        Text = self.title,
+        TextColor3 = Theme.Current.palette.text,
+        Font = Theme.Current.typography.bold,
+        TextSize = 18,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 21,
+    }, header)
+    local subLbl = Utils.make("TextLabel", {
+        Name = "SubtitleLabel",
+        Position = UDim2.fromOffset(53, 30),
+        Size = UDim2.new(1, -260, 0, 14),
+        BackgroundTransparency = 1,
+        Text = self.subtitle,
+        TextColor3 = Theme.Current.palette.textMuted,
+        Font = Theme.Current.typography.font,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 21,
+    }, header)
+    themePart(titleLbl, "text")
+    themePart(subLbl, "muted")
+
+    -- Right control buttons
+    local function makeCtrl(iconName, tooltip, z)
+        local b = Utils.make("TextButton", {
+            Size = UDim2.fromOffset(28, 28),
+            BackgroundColor3 = Theme.Current.palette.surface,
+            Text = "",
+            AutoButtonColor = false,
+            BorderSizePixel = 0,
+            ZIndex = z or 21,
+        }, header)
+        Utils.corner(b, 8)
+        Utils.stroke(b, Theme.Current.palette.border, 0.4, 1)
+        Icons.draw(b, iconName, 16, Theme.Current.palette.icon)
+        Motion.hover(b, Theme.Current.palette.hover, Theme.Current.palette.surface)
+        return b
+    end
+
+    local btnSearch = makeCtrl("search", "Buscar", 21)
+    local btnTheme  = makeCtrl("color", "Tema", 21)
+    local btnMin    = makeCtrl("minimize", "Minimizar", 21)
+    local btnClose  = makeCtrl("close", "Fechar", 21)
+
+    btnClose.Position = UDim2.new(1, -10, 0, 11)
+    btnMin.Position  = UDim2.new(1, -45, 0, 11)
+    btnTheme.Position = UDim2.new(1, -80, 0, 11)
+    btnSearch.Position = UDim2.new(1, -115, 0, 11)
+
+    -- Sidebar
+    local sidebar = Utils.make("Frame", {
+        Name = "Sidebar",
+        Position = UDim2.fromOffset(12, headerHeight + 10),
+        Size = UDim2.new(0, Theme.Current.shape.sidebarWidth, 1, -(headerHeight + 22)),
+        BackgroundColor3 = Theme.Current.palette.panel,
+        BorderSizePixel = 0,
+        ZIndex = 15,
+    }, main)
+    Utils.corner(sidebar, Theme.Current.shape.radiusCard)
+    Utils.stroke(sidebar, Theme.Current.palette.border, 0.4, 1)
+
+    local navList = Utils.make("ScrollingFrame", {
+        Name = "Nav",
+        Position = UDim2.fromOffset(8, 8),
+        Size = UDim2.new(1, -16, 1, -16),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 4,
+        ScrollBarImageColor3 = Theme.Current.palette.accent,
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        CanvasSize = UDim2.new(),
+        ZIndex = 16,
+    }, sidebar)
+    Utils.list(navList, 6)
+
+    -- Content area
+    local content = Utils.make("Frame", {
+        Name = "Content",
+        Position = UDim2.fromOffset(Theme.Current.shape.sidebarWidth + 28, headerHeight + 10),
+        Size = UDim2.new(1, -(Theme.Current.shape.sidebarWidth + 40), 1, -(headerHeight + 22)),
+        BackgroundColor3 = Theme.Current.palette.surface,
+        BorderSizePixel = 0,
+        ClipsDescendants = true,
+        ZIndex = 14,
+    }, main)
+    Utils.corner(content, Theme.Current.shape.radiusCard)
+
+    -- Page title (above scroll area)
+    local pageTitle = Utils.make("TextLabel", {
+        Name = "PageTitle",
+        Position = UDim2.fromOffset(0, 0),
+        Size = UDim2.new(1, 0, 0, 28),
+        BackgroundTransparency = 1,
+        Text = "",
+        TextColor3 = Theme.Current.palette.text,
+        Font = Theme.Current.typography.bold,
+        TextSize = 20,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 16,
+    }, content)
+    local pageSub = Utils.make("TextLabel", {
+        Name = "PageSub",
+        Position = UDim2.fromOffset(0, 30),
+        Size = UDim2.new(1, 0, 0, 18),
+        BackgroundTransparency = 1,
+        Text = "",
+        TextColor3 = Theme.Current.palette.textMuted,
+        Font = Theme.Current.typography.font,
+        TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 16,
+    }, content)
+
+    -- Scrolling page frame
+    local pageFrame = Utils.make("ScrollingFrame", {
+        Name = "Page",
+        Position = UDim2.fromOffset(0, 52),
+        Size = UDim2.new(1, 0, 1, -52),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 4,
+        ScrollBarImageColor3 = Theme.Current.palette.accent,
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        CanvasSize = UDim2.new(),
+        ZIndex = 15,
+    }, content)
+    Utils.list(pageFrame, 12)
+    Utils.pad(pageFrame, 14, 14, 14, 14)
+
+    -- Empty state
+    local empty = Utils.make("TextLabel", {
+        Name = "EmptyState",
+        Size = UDim2.new(1, 0, 0, 200),
+        BackgroundTransparency = 1,
+        Text = "Nenhuma aba criada.\nUse Window:Tab(...) para adicionar abas e controles.",
+        TextColor3 = Theme.Current.palette.textMuted,
+        Font = Theme.Current.typography.font,
+        TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Center,
+        TextYAlignment = Enum.TextYAlignment.Center,
+        Visible = true,
+        ZIndex = 15,
+    }, pageFrame)
+
+    self.containers.page = pageFrame
+    self.containers.empty = empty
+    self.containers.nav = navList
+    self.containers.pageTitle = pageTitle
+    self.containers.pageSub = pageSub
+    self.containers.content = content
+    self.containers.header = header
+
+    -- Drag
+    local dragging = false
+    local dragStart, startPos
+    header.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = main.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    local dragConn
+    if UserInputService then
+        dragConn = UserInputService.InputChanged:Connect(function(input)
+            if not dragging then return end
+            if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end
+            local delta = input.Position - dragStart
+            local nextPos = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            main.Position = nextPos
+            shadow.Position = UDim2.new(nextPos.X.Scale, nextPos.X.Offset, nextPos.Y.Scale, nextPos.Y.Offset + 6)
+        end)
+    end
+
+    -- Resize grip (desktop): bottom-right corner
+    self._size = { width = 780, height = 520 }
+    local grip = Utils.make("TextButton", {
+        Name = "ResizeGrip",
+        AnchorPoint = Vector2.new(1, 1),
+        Position = UDim2.new(1, -4, 1, -4),
+        Size = UDim2.fromOffset(20, 20),
+        BackgroundTransparency = 1,
+        Text = "",
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 25,
+    }, main)
+    local gripMark = Utils.make("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.62, 0.62),
+        Size = UDim2.fromOffset(9, 9),
+        BackgroundColor3 = Theme.Current.palette.textMuted,
+        BackgroundTransparency = 0.55,
+        BorderSizePixel = 0,
+        Rotation = -45,
+        ZIndex = 26,
+    }, grip)
+    Utils.corner(gripMark, 2)
+
+    local resizing = false
+    local resizeStart, resizeStartSize
+    grip.InputBegan:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
+        resizing = true
+        resizeStart = input.Position
+        resizeStartSize = Vector2.new(main.Size.X.Offset, main.Size.Y.Offset)
+    end)
+    if UserInputService then
+        UserInputService.InputChanged:Connect(function(input)
+            if not resizing then return end
+            if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end
+            local delta = input.Position - resizeStart
+            local w = Utils.clamp(resizeStartSize.X + delta.X, 320, 1600)
+            local h = Utils.clamp(resizeStartSize.Y + delta.Y, 240, 1000)
+            main.Size = UDim2.fromOffset(w, h)
+            shadow.Size = UDim2.fromOffset(w + 8, h + 8)
+            self._size = { width = w, height = h }
+        end)
+        UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                resizing = false
+            end
+        end)
+    end
+    self.grip = grip
+
+    -- Responsive adaptation: collapse sidebar on narrow viewports
+    self._sidebarCollapsed = false
+    local function applyResponsive()
+        local cam = Workspace and Workspace.CurrentCamera
+        local vp = cam and cam.ViewportSize or Vector2.new(1920, 1080)
+        local winW = main.Size.X.Offset
+        local collapsed = winW < 560
+        if collapsed ~= self._sidebarCollapsed then
+            self._sidebarCollapsed = collapsed
+            local targetWidth = collapsed and 56 or Theme.Current.shape.sidebarWidth
+            Motion.animate(sidebar, { Size = UDim2.new(0, targetWidth, 1, -(headerHeight + 22)) }, Motion.duration("Standard"))
+            Motion.animate(content, {
+                Position = UDim2.fromOffset(targetWidth + 28, headerHeight + 10),
+                Size = UDim2.new(1, -(targetWidth + 40), 1, -(headerHeight + 22)),
+            }, Motion.duration("Standard"))
+            -- Hide nav labels when collapsed
+            for _, t in pairs(self.tabs) do
+                Utils.set(t.titleLabel, "Visible", not collapsed)
+            end
+        end
+    end
+    self._applyResponsive = applyResponsive
+
+    -- Viewport listener
+    if Workspace and Workspace.CurrentCamera then
+        local camConn = Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+            applyResponsive()
+        end)
+        self._camConn = camConn
+    end
+    applyResponsive()
+
+    -- Minimize float button
+    self.minGui = Utils.make("TextButton", {
+        Name = "MinimizeFloat",
+        Size = UDim2.fromOffset(56, 56),
+        Position = UDim2.fromOffset(20, 20),
+        BackgroundColor3 = Theme.Current.palette.panel,
+        Text = "",
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        Visible = false,
+        ZIndex = 50,
+    }, gui)
+    Utils.corner(self.minGui, 28)
+    Utils.stroke(self.minGui, Theme.Current.palette.accent, 0, 2)
+    local minIcon = Utils.make("TextLabel", {
+        Size = UDim2.fromScale(1,1),
+        BackgroundTransparency = 1,
+        Text = "≡",
+        TextColor3 = Theme.Current.palette.accent,
+        Font = Theme.Current.typography.bold,
+        TextSize = 22,
+        ZIndex = 51,
+    }, self.minGui)
+    Motion.hover(self.minGui, Theme.Current.palette.hover, Theme.Current.palette.panel)
+
+    -- NOTE: Minimize/Restore live on the Window metatable so every mode
+    -- (FloatingButton / Dock / CompactBar) shares one implementation.
+    btnMin.Activated:Connect(function() self:Minimize() end)
+    self.minGui.Activated:Connect(function() self:Restore() end)
+    btnClose.Activated:Connect(function() self:Destroy() end)
+
+    -- Search button
+    btnSearch.Activated:Connect(function()
+        Search.openPalette(self)
+    end)
+
+    -- Theme button
+    btnTheme.Activated:Connect(function()
+        ThemeStudio.open(self)
+    end)
+
+    WindowMgr.register(self)
+    WindowMgr.focus(self)
+    Search.installHotkey(self)
+
+    -- Initial fade-in
+    main.BackgroundTransparency = 1
+    shadow.BackgroundTransparency = 1
+    gui.Parent = container
+    Motion.animate(main, { BackgroundTransparency = Theme.Current.glass.opacity }, Motion.duration("Emphasis"))
+    Motion.animate(shadow, { BackgroundTransparency = 0.5 }, Motion.duration("Emphasis"))
+
+    return self
+end
+
+function Window:setTitle(text)
+    self.title = text
+    local tLbl = self.gui:FindFirstChild("TitleLabel", true)
+    if tLbl then tLbl.Text = text end
+end
+
+function Window:setTheme(theme)
+    Theme.apply(theme)
+    self:refreshTheme()
+end
+
+function Window:refreshTheme()
+    local t = Theme.Current
+    Utils.set(self.main, "BackgroundColor3", t.palette.background)
+    Utils.set(self.main, "BackgroundTransparency", t.glass.opacity)
+    -- Components read Theme.Current at render; no full rebuild needed
+end
+
+function Window:setGlass(material)
+    Glass.material(material)
+    self:refreshTheme()
+end
+
+function Window:setQuality(level)
+    Theme.Quality = level
+    Theme.Current.glass.material = (level == "Eco") and "Solid" or Theme.Current.glass.material
+    self:refreshTheme()
+end
+
+function Window:setMotion(preset)
+    Theme.Motion = preset
+    Theme.Current.motion.preset = preset
+end
+
+function Window:setWindowMode(mode)
+    self.opts.Window = self.opts.Window or {}
+    self.opts.Window.mode = mode
+end
+
+function Window:setMinimizeMode(mode)
+    self.opts.Minimize = self.opts.Minimize or {}
+    self.opts.Minimize.mode = mode
+end
+
+function Window:Notify(opts)
+    return Notify.create(opts)
+end
+
+function Window:OpenCommandPalette()
+    Search.openPalette(self)
+end
+
+function Window:OpenThemeStudio()
+    ThemeStudio.open(self)
+end
+
+function Window:GoTo(tabId)
+    local tab = self.tabs[tabId]
+    if tab then tab:Select() end
+end
+
+function Window:Destroy()
+    if self.destroyed then return end
+    self.destroyed = true
+    Motion.cancel(self.main)
+    Motion.cancel(self.shadow)
+    for _, tab in pairs(self.tabs) do
+        pcall(function() tab:Destroy() end)
+    end
+    self.tabs = {}
+    self.tabOrder = {}
+    pcall(function() self.gui:Destroy() end)
+    pcall(function() self.minGui:Destroy() end)
+    WindowMgr.windows[self.id] = nil
+    if WindowMgr.focused == self then WindowMgr.focused = nil end
+end
+
+Window.destroy = Window.Destroy
+
+--==============================================================================
+--  TAB
+--==============================================================================
+
+Tab = {}
+Tab.__index = Tab
+
+function Tab.new(window, opts)
+    opts = opts or {}
+    local id = opts.Id or opts.id or Utils.id("tab")
+    local self = setmetatable({}, Tab)
+    self.id = id
+    self.window = window
+    self.opts = opts
+    self.title = opts.Title or opts.Name or "Aba"
+    self.icon = opts.Icon or ""
+    self.desc = opts.Description or ""
+    self.sections = {}
+    self.controls = {}
+    self.visible = true
+
+    local nav = window.containers.nav
+    local btn = Utils.make("TextButton", {
+        Name = "Tab_" .. id,
+        Size = UDim2.new(1, 0, 0, 46),
+        BackgroundColor3 = Theme.Current.palette.panel,
+        Text = "",
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 17,
+    }, nav)
+    Utils.corner(btn, 10)
+    Utils.stroke(btn, Theme.Current.palette.border, 0.3, 1)
+
+    local marker = Utils.make("Frame", {
+        Position = UDim2.fromOffset(0, 10),
+        Size = UDim2.fromOffset(4, 26),
+        BackgroundColor3 = Theme.Current.palette.accent,
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ZIndex = 18,
+    }, btn)
+    Utils.corner(marker, 2)
+
+    local icHolder = Utils.make("Frame", {
+        Position = UDim2.fromOffset(12, 12),
+        Size = UDim2.fromOffset(22, 22),
+        BackgroundTransparency = 1,
+        ZIndex = 18,
+    }, btn)
+    if self.icon and self.icon ~= "" then
+        Icons.draw(icHolder, self.icon, 18, Theme.Current.palette.icon)
+    end
+
+    local tLbl = Utils.make("TextLabel", {
+        Position = UDim2.fromOffset(44, 0),
+        Size = UDim2.new(1, -56, 1, 0),
+        BackgroundTransparency = 1,
+        Text = self.title,
+        TextColor3 = Theme.Current.palette.textMuted,
+        Font = Theme.Current.typography.font,
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 18,
+    }, btn)
+    themePart(btn, "surface")
+    themePart(tLbl, "muted")
+    themePart(marker, "accent")
+    Motion.hover(btn, Theme.Current.palette.hover, Theme.Current.palette.panel)
+
+    -- Page content
+    local page = window.containers.page
+    local sectionFlow = Utils.make("Frame", {
+        Name = "TabContent_" .. id,
+        Size = UDim2.new(1, 0, 0, 0),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Visible = false,
+        ZIndex = 15,
+    }, page)
+    local flowList = Utils.list(sectionFlow, 10)
+
+    self.instance = btn
+    self.marker = marker
+    self.titleLabel = tLbl
+    self.content = sectionFlow
+    self.flowList = flowList
+
+    function self:Select()
+        if window.currentTab == self then return end
+        if window.currentTab then window.currentTab:Deselect() end
+        window.currentTab = self
+        for _, t in pairs(window.tabs) do
+            Utils.set(t.instance, "BackgroundColor3", Theme.Current.palette.panel)
+            Utils.set(t.marker, "BackgroundTransparency", 1)
+            Utils.set(t.titleLabel, "TextColor3", Theme.Current.palette.textMuted)
+            t.content.Visible = false
+        end
+        Utils.set(btn, "BackgroundColor3", Theme.Current.palette.surface)
+        Utils.set(marker, "BackgroundTransparency", 0)
+        Utils.set(tLbl, "TextColor3", Theme.Current.palette.accent)
+        sectionFlow.Visible = true
+        window.containers.empty.Visible = false
+        window.containers.pageTitle.Text = self.title
+        window.containers.pageSub.Text = self.desc
+        sectionFlow.Position = UDim2.new(0, 10, 0, 0)
+        Motion.animate(sectionFlow, { Position = UDim2.new(0, 0, 0, 0) }, Motion.duration("Navigation"))
+        WindowMgr.focus(window)
+    end
+
+    function self:Deselect()
+        sectionFlow.Visible = false
+    end
+
+    function self:Destroy()
+        for _, s in pairs(self.sections) do pcall(function() s:Destroy() end) end
+        pcall(function() btn:Destroy() end)
+        pcall(function() sectionFlow:Destroy() end)
+        Search.unregister("tab:" .. self.id)
+        for sid in pairs(self._sectionIds or {}) do Search.unregister("section:" .. sid) end
+        window.tabs[self.id] = nil
+        for i, tid in ipairs(window.tabOrder) do
+            if tid == self.id then table.remove(window.tabOrder, i) break end
+        end
+    end
+
+    Tab.destroy = self.Destroy
+
+    btn.Activated:Connect(function() self:Select() end)
+
+    window.tabs[id] = self
+    table.insert(window.tabOrder, id)
+    if #window.tabOrder == 1 then self:Select() end
+
+    Search.register({
+        id = "tab:" .. id,
+        title = self.title,
+        desc = self.desc ~= "" and self.desc or "Aba",
+        keywords = table.concat({ self.title, self.desc or "", id }, " "),
+        aliases = id,
+        tabId = id,
+        type = "tab",
+    })
+    return self
+end
+
+function Tab:Section(opts)
+    if type(opts) == "string" then opts = { Title = opts } end
+    return Section.new(self, opts)
+end
+
+-- Generic component shortcut on Tab
+function Tab:_comp(kind, ...)
+    local args = {...}
+    local section = self.sections[next(self.sections)] or Section.new(self, { Title = "Controles" })
+    local body = section.container
+    local first = args[1]
+    local opts, cb
+    if type(first) == "string" then
+        opts = { Title = first }
+        cb = args[2]
+    else
+        opts = first
+        cb = args[2]
+    end
+    if type(opts) == "table" then
+        opts.__tabId = self.id
+        opts.__sectionId = section.id
+    end
+    local comp = Components.resolve(kind)
+    if not comp then
+        warn("[limui] component type not found: " .. tostring(kind))
+        return nil
+    end
+    return comp(body, opts, cb)
+end
+
+for _, k in ipairs({"Button","Toggle","Slider","Dropdown","Input","ColorPicker","Keybind","Label","Separator","Paragraph","Card"}) do
+    Tab[k] = function(self, ...) return self:_comp(k, ...) end
+end
+
+--==============================================================================
+--  SECTION
+--==============================================================================
+
+Section = {}
+Section.__index = Section
+
+function Section.new(tab, opts)
+    opts = opts or {}
+    local id = opts.Id or opts.id or Utils.id("section")
+    local self = setmetatable({}, Section)
+    self.id = id
+    self.tab = tab
+    self.opts = opts
+    self.title = opts.Title or "Seção"
+    self.desc = opts.Description or ""
+    self.collapsible = opts.Collapsible or false
+    self.collapsed = false
+    self.controls = {}
+
+    local container = tab.content
+    local sec = Utils.make("Frame", {
+        Name = "Section_" .. id,
+        Size = UDim2.new(1, 0, 0, 0),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        AutomaticSize = Enum.AutomaticSize.Y,
+        ZIndex = 15,
+    }, container)
+    Utils.list(sec, 8)
+    Utils.pad(sec, 0, 0, 8, 0)
+
+    local header = Utils.make("Frame", {
+        Name = "Header",
+        Size = UDim2.new(1, 0, 0, 0),
+        BackgroundTransparency = 1,
+        AutomaticSize = Enum.AutomaticSize.Y,
+        ZIndex = 16,
+    }, sec)
+    Utils.list(header, 4)
+    Utils.pad(header, 0, 0, 6, 0)
+
+    local tLbl = Utils.make("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 20),
+        BackgroundTransparency = 1,
+        Text = self.title,
+        TextColor3 = Theme.Current.palette.text,
+        Font = Theme.Current.typography.bold,
+        TextSize = 15,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 17,
+    }, header)
+    if self.desc and self.desc ~= "" then
+        Utils.make("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 14),
+            BackgroundTransparency = 1,
+            Text = self.desc,
+            TextColor3 = Theme.Current.palette.textMuted,
+            Font = Theme.Current.typography.font,
+            TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            ZIndex = 17,
+        }, header)
+    end
+
+    local body = Utils.make("Frame", {
+        Name = "Body",
+        Size = UDim2.new(1, 0, 0, 0),
+        BackgroundTransparency = 1,
+        AutomaticSize = Enum.AutomaticSize.Y,
+        ZIndex = 16,
+    }, sec)
+    Utils.list(body, 8)
+    Utils.pad(body, 0, 0, 0, 0)
+
+    self.instance = sec
+    self.body = body
+    self.container = body  -- FIX: section.container now points to body
+
+    function self:Destroy()
+        for _, c in pairs(self.controls) do pcall(function() c:Destroy() end) end
+        pcall(function() sec:Destroy() end)
+        Search.unregister("section:" .. self.id)
+        tab.sections[self.id] = nil
+    end
+
+    Section.destroy = self.Destroy
+
+    tab.sections[id] = self
+    Search.register({
+        id = "section:" .. id,
+        title = self.title,
+        desc = self.desc ~= "" and self.desc or "Seção",
+        keywords = table.concat({ self.title, self.desc or "" }, " "),
+        tabId = tab.id,
+        sectionId = id,
+        type = "section",
+    })
+    return self
+end
+
+function Section:_comp(kind, ...)
+    local args = {...}
+    local body = self.container
+    local first = args[1]
+    local opts, cb
+    if type(first) == "string" then
+        opts = { Title = first }
+        cb = args[2]
+    else
+        opts = first
+        cb = args[2]
+    end
+    if type(opts) == "table" then
+        opts.__tabId = self.tab and self.tab.id or nil
+        opts.__sectionId = self.id
+    end
+    local comp = Components.resolve(kind)
+    if not comp then
+        warn("[limui] component type not found: " .. tostring(kind))
+        return nil
+    end
+    return comp(body, opts, cb)
+end
+
+for _, k in ipairs({"Button","Toggle","Slider","Dropdown","Input","ColorPicker","Keybind","Label","Separator","Paragraph","Card"}) do
+    Section[k] = function(self, ...) return self:_comp(k, ...) end
+end
+
+--==============================================================================
+--  COMPONENTS REGISTRY (case-insensitive lookup)
+--==============================================================================
+
+Components = {}
+local componentRegistry = {}
+
+local function registerComponent(name, constructor)
+    Components[name] = constructor
+    componentRegistry[name:lower()] = constructor
+end
+
+function Components.resolve(kind)
+    if type(kind) ~= "string" then return nil end
+    return componentRegistry[kind:lower()] or Components[kind]
+end
+
+-- shared label creator
+local function makeLabel(parent, text, size, color, font, xalign)
+    return Utils.make("TextLabel", {
+        Size = size or UDim2.new(0, 200, 0, 16),
+        BackgroundTransparency = 1,
+        Text = text or "",
+        TextColor3 = color or Theme.Current.palette.text,
+        Font = font or Theme.Current.typography.font,
+        TextSize = size and 13 or 13,
+        TextXAlignment = xalign or Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        ZIndex = 18,
+    }, parent)
+end
+
+-- Button
+function Components.Button(parent, opts, onActivated)
+    opts = opts or {}
+    local id = opts.Id or Utils.id("button")
+    local title = opts.Title or opts.Name or "Botão"
+    local desc = opts.Description or ""
+    local callback = opts.Callback or onActivated or function() end
+    local style = opts.Style or "primary"
+
+    local btn = Utils.make("TextButton", {
+        Size = UDim2.new(1, 0, 0, 42),
+        BackgroundColor3 = Theme.Current.palette.surface,
+        Text = "",
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 18,
+    }, parent)
+    Utils.corner(btn, Theme.Current.shape.radiusButton)
+    Utils.stroke(btn, Theme.Current.palette.border, 0.3, 1)
+
+    local fill = Utils.make("Frame", {
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundColor3 = Theme.Current.palette.accent,
+        BackgroundTransparency = (style == "primary") and 0 or 1,
+        BorderSizePixel = 0,
+        ZIndex = 18,
+    }, btn)
+    Utils.corner(fill, Theme.Current.shape.radiusButton)
+
+    local tLbl = Utils.make("TextLabel", {
+        Position = UDim2.fromOffset(14, 0),
+        Size = UDim2.new(1, -28, 0, 20),
+        BackgroundTransparency = 1,
+        Text = title,
+        TextColor3 = (style == "primary") and Theme.Current.palette.text or Theme.Current.palette.textMuted,
+        Font = Theme.Current.typography.font,
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 19,
+    }, btn)
+    if desc and desc ~= "" then
+        Utils.make("TextLabel", {
+            Position = UDim2.fromOffset(14, 20),
+            Size = UDim2.new(1, -28, 0, 14),
+            BackgroundTransparency = 1,
+            Text = desc,
+            TextColor3 = Theme.Current.palette.textMuted,
+            Font = Theme.Current.typography.font,
+            TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            ZIndex = 19,
+        }, btn)
+    end
+
+    themePart(btn, "surface")
+    themePart(fill, "accent")
+    themePart(tLbl, "text")
+    Motion.hover(btn, Theme.Current.palette.hover, Theme.Current.palette.surface)
+
+    local pressed = false
+    btn.Activated:Connect(function()
+        if pressed then return end
+        pressed = true
+        Utils.call(callback)
+        local scaleInst = Utils.scale(btn, 1)
+        Motion.animate(scaleInst, { Scale = 0.96 }, 0.06)
+        task.delay(0.08, function()
+            if scaleInst and scaleInst.Parent then
+                Motion.animate(scaleInst, { Scale = 1 }, 0.1)
+            end
+        end)
+        pressed = false
+    end)
+
+    local handle = Control.new(id, "button", btn, function() return nil end, function() end, opts)
+    handle.setTitle = function(t) tLbl.Text = t end
+    handle.setDisabled = function(d) Control.setDisabled(handle, d) end
+    handle.setVisible = function(v) Control.setVisible(handle, v) end
+    handle.destroy = function() Control.destroy(handle) end
+    handle.Destroy = handle.destroy
+    return handle
+end
+registerComponent("Button", Components.Button)
+
+-- Toggle
+function Components.Toggle(parent, opts, onChanged)
+    opts = opts or {}
+    local id = opts.Id or Utils.id("toggle")
+    local title = opts.Title or opts.Name or "Alternar"
+    local desc = opts.Description or ""
+    local default = opts.Default or false
+    local callback = opts.Callback or onChanged or function() end
+
+    local val = default
+    local btn = Utils.make("TextButton", {
+        Size = UDim2.new(1, 0, 0, 42),
+        BackgroundColor3 = Theme.Current.palette.surface,
+        Text = "",
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 18,
+    }, parent)
+    Utils.corner(btn, Theme.Current.shape.radiusButton)
+    Utils.stroke(btn, Theme.Current.palette.border, 0.3, 1)
+
+    local track = Utils.make("Frame", {
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.fromOffset(14, 21),
+        Size = UDim2.fromOffset(46, 22),
+        BackgroundColor3 = val and Theme.Current.palette.accent or Theme.Current.palette.border,
+        BorderSizePixel = 0,
+        ZIndex = 18,
+    }, btn)
+    Utils.corner(track, 11)
+    local knob = Utils.make("Frame", {
+        Position = val and UDim2.fromOffset(26, 2) or UDim2.fromOffset(2, 2),
+        Size = UDim2.fromOffset(18, 18),
+        BackgroundColor3 = Color3.fromRGB(255,255,255),
+        BorderSizePixel = 0,
+        ZIndex = 19,
+    }, track)
+    Utils.corner(knob, 9)
+
+    local tLbl = makeLabel(btn, title, UDim2.new(1, -90, 0, 20), nil, nil, nil)
+    tLbl.Position = UDim2.fromOffset(70, 6)
+    if desc and desc ~= "" then
+        local dLbl = makeLabel(btn, desc, UDim2.new(1, -90, 0, 14), Theme.Current.palette.textMuted, nil, nil)
+        dLbl.Position = UDim2.fromOffset(70, 23)
+        dLbl.TextSize = 11
+    end
+
+    local function set(v)
+        val = v
+        Utils.set(track, "BackgroundColor3", v and Theme.Current.palette.accent or Theme.Current.palette.border)
+        Motion.animate(knob, { Position = v and UDim2.fromOffset(26,2) or UDim2.fromOffset(2,2) }, Motion.duration("Micro"))
+        Utils.call(callback, v)
+    end
+
+    themePart(btn, "surface")
+    themePart(tLbl, "text")
+    btn.Activated:Connect(function() set(not val) end)
+    set(val)
+
+    local handle = Control.new(id, "toggle", btn, function() return val end, function(v) set(v) end, opts)
+    handle.themeHook = function()
+        Utils.set(track, "BackgroundColor3", val and Theme.Current.palette.accent or Theme.Current.palette.border)
+    end
+    handle.setValue = function(v, silent)
+        if silent then
+            val = v
+            Utils.set(track, "BackgroundColor3", v and Theme.Current.palette.accent or Theme.Current.palette.border)
+            Utils.set(knob, "Position", v and UDim2.fromOffset(26,2) or UDim2.fromOffset(2,2))
+        else
+            set(v)
+        end
+        return handle
+    end
+    handle.getValue = function() return val end
+    handle.setDisabled = function(d) Control.setDisabled(handle, d) end
+    handle.setVisible = function(v) Control.setVisible(handle, v) end
+    handle.destroy = function() Control.destroy(handle) end
+    handle.Destroy = handle.destroy
+    return handle
+end
+registerComponent("Toggle", Components.Toggle)
+
+-- Slider
+function Components.Slider(parent, opts, onChanged)
+    opts = opts or {}
+    local id = opts.Id or Utils.id("slider")
+    local title = opts.Title or opts.Name or "Slider"
+    local desc = opts.Description or ""
+    local min = opts.Min or 0
+    local max = opts.Max or 100
+    local step = opts.Step or 1
+    local default = opts.Default or min
+    local suffix = opts.Suffix or ""
+    local callback = opts.Callback or onChanged or function() end
+
+    local val = math.clamp(default, min, max)
+
+    local btn = Utils.make("TextButton", {
+        Size = UDim2.new(1, 0, 0, 56),
+        BackgroundColor3 = Theme.Current.palette.surface,
+        Text = "",
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 18,
+    }, parent)
+    Utils.corner(btn, Theme.Current.shape.radiusButton)
+    Utils.stroke(btn, Theme.Current.palette.border, 0.3, 1)
+
+    local tLbl = makeLabel(btn, title, UDim2.new(0.5, 0, 0, 18), nil, nil, nil)
+    tLbl.Position = UDim2.fromOffset(14, 8)
+    local vLbl = makeLabel(btn, tostring(val) .. suffix, UDim2.new(0.5, 0, 0, 18), Theme.Current.palette.accent, Theme.Current.typography.bold, Enum.TextXAlignment.Right)
+    vLbl.Position = UDim2.fromOffset(14, 8)
+    vLbl.AnchorPoint = Vector2.new(1, 0)
+
+    local track = Utils.make("Frame", {
+        Position = UDim2.fromOffset(14, 34),
+        Size = UDim2.new(1, -28, 0, 6),
+        BackgroundColor3 = Theme.Current.palette.border,
+        BorderSizePixel = 0,
+        ZIndex = 18,
+    }, btn)
+    Utils.corner(track, 3)
+
+    local fill = Utils.make("Frame", {
+        Size = UDim2.new(0, 0, 1, 0),
+        BackgroundColor3 = Theme.Current.palette.accent,
+        BorderSizePixel = 0,
+        ZIndex = 19,
+    }, track)
+    Utils.corner(fill, 3)
+
+    local knob = Utils.make("Frame", {
+        Position = UDim2.new(0, 0, 0.5, 0),
+        Size = UDim2.fromOffset(16, 16),
+        BackgroundColor3 = Color3.fromRGB(255,255,255),
+        BorderSizePixel = 0,
+        ZIndex = 20,
+    }, fill)
+    Utils.corner(knob, 8)
+    Utils.stroke(knob, Theme.Current.palette.accent, 0, 1.5)
+
+    local dragging = false
+    local function update(percent)
+        percent = math.clamp(percent, 0, 1)
+        local raw = min + (max - min) * percent
+        if step and step > 0 then raw = math.floor((raw - min) / step + 0.5) * step + min end
+        val = math.clamp(raw, min, max)
+        local pct = (val - min) / (max - min)
+        Utils.set(fill, "Size", UDim2.new(pct, 0, 1, 0))
+        Utils.set(knob, "Position", UDim2.new(pct, -8, 0.5, 0))
+        Utils.set(vLbl, "Text", tostring(val) .. suffix)
+        Utils.call(callback, val)
+    end
+
+    btn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            local abs = track.AbsolutePosition.X
+            local w = track.AbsoluteSize.X
+            local pct = (input.Position.X - abs) / w
+            update(pct)
+        end
+    end)
+    local dragConn
+    if UserInputService then
+        dragConn = UserInputService.InputChanged:Connect(function(input)
+            if not dragging then return end
+            if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end
+            local abs = track.AbsolutePosition.X
+            local w = track.AbsoluteSize.X
+            local pct = (input.Position.X - abs) / w
+            update(pct)
+        end)
+    end
+    local endConn
+    if UserInputService then
+        endConn = UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
+        end)
+    end
+
+    themePart(btn, "surface")
+    themePart(track, "track")
+    themePart(fill, "accent")
+    themePart(tLbl, "text")
+    themePart(vLbl, "accent")
+    update((val - min) / (max - min))
+
+    local handle = Control.new(id, "slider", btn, function() return val end, function(v)
+        val = math.clamp(v, min, max)
+        update((val - min) / (max - min))
+    end, opts)
+    handle.setValue = function(v, silent)
+        val = math.clamp(v, min, max)
+        local pct = (val - min) / (max - min)
+        Utils.set(fill, "Size", UDim2.new(pct,0,1,0))
+        Utils.set(knob, "Position", UDim2.new(pct,-8,0.5,0))
+        Utils.set(vLbl, "Text", tostring(val)..suffix)
+        if not silent then Utils.call(callback, val) end
+        return handle
+    end
+    handle.getValue = function() return val end
+    handle.setDisabled = function(d) Control.setDisabled(handle, d); dragging = false end
+    handle.setVisible = function(v) Control.setVisible(handle, v) end
+    handle.destroy = function()
+        if dragConn then dragConn:Disconnect() end
+        if endConn then endConn:Disconnect() end
+        Control.destroy(handle)
+    end
+    handle.Destroy = handle.destroy
+    return handle
+end
+registerComponent("Slider", Components.Slider)
+
+-- Dropdown
+function Components.Dropdown(parent, opts, onChanged)
+    opts = opts or {}
+    local id = opts.Id or Utils.id("dropdown")
+    local title = opts.Title or opts.Name or "Selecionar"
+    local desc = opts.Description or ""
+    local options = opts.Options or {}
+    local default = opts.Default
+    local callback = opts.Callback or onChanged or function() end
+
+    local selected = default or (options[1] and (options[1].Id or options[1]) or nil)
+    local open = false
+
+    local btn = Utils.make("TextButton", {
+        Size = UDim2.new(1, 0, 0, 42),
+        BackgroundColor3 = Theme.Current.palette.surface,
+        Text = "",
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 18,
+    }, parent)
+    Utils.corner(btn, Theme.Current.shape.radiusButton)
+    Utils.stroke(btn, Theme.Current.palette.border, 0.3, 1)
+
+    local tLbl = makeLabel(btn, title, UDim2.new(0.5, 0, 0, 18), nil, nil, nil)
+    tLbl.Position = UDim2.fromOffset(14, 8)
+    local vLbl = makeLabel(btn, tostring(selected or ""), UDim2.new(0.5, 0, 0, 18), Theme.Current.palette.textMuted, nil, Enum.TextXAlignment.Right)
+    vLbl.Position = UDim2.fromOffset(14, 8)
+    vLbl.AnchorPoint = Vector2.new(1, 0)
+
+    local arrow = makeLabel(btn, "▼", UDim2.fromOffset(16, 16), Theme.Current.palette.textMuted, nil, nil)
+    arrow.Position = UDim2.new(1, -20, 0.5, 0)
+    arrow.AnchorPoint = Vector2.new(1, 0.5)
+
+    local list = Utils.make("ScrollingFrame", {
+        Position = UDim2.fromOffset(0, 44),
+        Size = UDim2.new(1, 0, 0, 0),
+        BackgroundColor3 = Theme.Current.palette.panel,
+        BorderSizePixel = 0,
+        Visible = false,
+        ScrollBarThickness = 4,
+        ScrollBarImageColor3 = Theme.Current.palette.accent,
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        CanvasSize = UDim2.new(),
+        ZIndex = 60,
+    }, parent)
+    Utils.corner(list, Theme.Current.shape.radiusCard)
+    Utils.stroke(list, Theme.Current.palette.border, 0.3, 1)
+    Utils.list(list, 4)
+    Utils.pad(list, 6, 6, 6, 6)
+    list.Parent = btn.Parent
+
+    local function buildList()
+        for _, c in ipairs(list:GetChildren()) do
+            if c:IsA("TextButton") then c:Destroy() end
+        end
+        for i, opt in ipairs(options) do
+            local oid = opt.Id or opt or tostring(i)
+            local olabel = opt.Label or opt or tostring(i)
+            local ob = Utils.make("TextButton", {
+                Size = UDim2.new(1, -12, 0, 30),
+                BackgroundColor3 = (selected == oid) and Theme.Current.palette.accent or Theme.Current.palette.surface,
+                Text = olabel,
+                TextColor3 = (selected == oid) and Color3.fromRGB(255,255,255) or Theme.Current.palette.text,
+                Font = Theme.Current.typography.font,
+                TextSize = 12,
+                AutoButtonColor = false,
+                BorderSizePixel = 0,
+                ZIndex = 61,
+            }, list)
+            Utils.corner(ob, 6)
+            ob.Activated:Connect(function()
+                selected = oid
+                Utils.set(vLbl, "Text", tostring(olabel))
+                Utils.set(list, "Visible", false)
+                Utils.set(btn, "Size", UDim2.new(1, 0, 0, 42))
+                Utils.set(arrow, "Text", "▼")
+                open = false
+                Utils.call(callback, oid)
+                buildList()
+            end)
+        end
+    end
+    buildList()
+
+    btn.Activated:Connect(function()
+        open = not open
+        Utils.set(list, "Visible", open)
+        if open then
+            Utils.set(btn, "Size", UDim2.new(1, 0, 0, 42))
+            Utils.set(arrow, "Text", "▲")
+            local h = math.min(#options * 34 + 12, 200)
+            Utils.set(list, "Size", UDim2.new(1, 0, 0, h))
+        else
+            Utils.set(arrow, "Text", "▼")
+        end
+    end)
+
+    themePart(btn, "surface")
+    themePart(tLbl, "text")
+    themePart(vLbl, "muted")
+    themePart(arrow, "muted")
+    themePart(list, "panel")
+    local handle = Control.new(id, "dropdown", btn, function() return selected end, function(v)
+        selected = v
+        Utils.call(callback, v)
+        buildList()
+    end, opts)
+    handle.setValue = function(v, silent)
+        selected = v
+        if not silent then Utils.call(callback, v) end
+        buildList()
+        return handle
+    end
+    handle.getValue = function() return selected end
+    handle.setOptions = function(newOpts)
+        options = newOpts or {}
+        buildList()
+        return handle
+    end
+    handle.setDisabled = function(d) Control.setDisabled(handle, d) end
+    handle.setVisible = function(v) Control.setVisible(handle, v) end
+    handle.destroy = function()
+        pcall(function() list:Destroy() end)
+        Control.destroy(handle)
+    end
+    handle.Destroy = handle.destroy
+    return handle
+end
+registerComponent("Dropdown", Components.Dropdown)
+
+-- Input
+function Components.Input(parent, opts, onChanged)
+    opts = opts or {}
+    local id = opts.Id or Utils.id("input")
+    local title = opts.Title or opts.Name or "Entrada"
+    local desc = opts.Description or ""
+    local placeholder = opts.Placeholder or "Digite..."
+    local default = opts.Default or ""
+    local callback = opts.Callback or onChanged or function() end
+
+    local box = Utils.make("TextBox", {
+        Size = UDim2.new(1, 0, 0, 42),
+        BackgroundColor3 = Theme.Current.palette.surface,
+        Text = default,
+        PlaceholderText = placeholder,
+        PlaceholderColor3 = Theme.Current.palette.placeholder,
+        TextColor3 = Theme.Current.palette.text,
+        Font = Theme.Current.typography.font,
+        TextSize = 13,
+        ClearTextOnFocus = false,
+        BorderSizePixel = 0,
+        ZIndex = 18,
+    }, parent)
+    Utils.corner(box, Theme.Current.shape.radiusButton)
+    Utils.stroke(box, Theme.Current.palette.border, 0.3, 1)
+    Utils.pad(box, 0, 12, 0, 12)
+
+    box.FocusLost:Connect(function(enter)
+        Utils.call(callback, box.Text)
+    end)
+
+    themePart(box, "surface")
+    themePart(box, "placeholder", { placeholder = true })
+    local handle = Control.new(id, "input", box, function() return box.Text end, function(v)
+        box.Text = tostring(v or "")
+    end, opts)
+    handle.setValue = function(v, silent)
+        box.Text = tostring(v or "")
+        if not silent then Utils.call(callback, box.Text) end
+        return handle
+    end
+    handle.getValue = function() return box.Text end
+    handle.setDisabled = function(d) Control.setDisabled(handle, d); Utils.set(box, "Editable", not d) end
+    handle.setVisible = function(v) Control.setVisible(handle, v) end
+    handle.focus = function() box:CaptureFocus() end
+    handle.destroy = function() Control.destroy(handle) end
+    handle.Destroy = handle.destroy
+    return handle
+end
+registerComponent("Input", Components.Input)
+
+-- ColorPicker
+function Components.ColorPicker(parent, opts, onChanged)
+    opts = opts or {}
+    local id = opts.Id or Utils.id("colorpicker")
+    local title = opts.Title or opts.Name or "Cor"
+    local default = opts.Default or Color3.fromRGB(255, 255, 255)
+    local callback = opts.Callback or onChanged or function() end
+
+    local val = default
+
+    local btn = Utils.make("TextButton", {
+        Size = UDim2.new(1, 0, 0, 42),
+        BackgroundColor3 = val,
+        Text = "",
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 18,
+    }, parent)
+    Utils.corner(btn, Theme.Current.shape.radiusButton)
+    Utils.stroke(btn, Theme.Current.palette.border, 0.3, 1)
+
+    local tLbl = makeLabel(btn, title, UDim2.new(0.6, 0, 0, 18), nil, nil, nil)
+    tLbl.Position = UDim2.fromOffset(14, 8)
+    local hexLbl = makeLabel(btn, Utils.colorToHex(val), UDim2.new(0.4, 0, 0, 18), Theme.Current.palette.textMuted, nil, Enum.TextXAlignment.Right)
+    hexLbl.Position = UDim2.fromOffset(14, 8)
+    hexLbl.AnchorPoint = Vector2.new(1, 0)
+
+    local picker = Utils.make("Frame", {
+        Position = UDim2.fromOffset(0, 44),
+        Size = UDim2.new(1, 0, 0, 180),
+        BackgroundColor3 = Theme.Current.palette.panel,
+        BorderSizePixel = 0,
+        Visible = false,
+        ZIndex = 60,
+    }, btn.Parent)
+    Utils.corner(picker, Theme.Current.shape.radiusCard)
+    Utils.stroke(picker, Theme.Current.palette.border, 0.3, 1)
+
+    local swatch = Utils.make("Frame", {
+        Position = UDim2.fromOffset(12, 12),
+        Size = UDim2.fromOffset(100, 100),
+        BackgroundColor3 = val,
+        BorderSizePixel = 0,
+        ZIndex = 61,
+    }, picker)
+    Utils.corner(swatch, 10)
+
+    local hue = Utils.make("Frame", {
+        Position = UDim2.fromOffset(124, 12),
+        Size = UDim2.fromOffset(18, 100),
+        BackgroundColor3 = Color3.fromRGB(255,0,0),
+        BorderSizePixel = 0,
+        ZIndex = 61,
+    }, picker)
+    Utils.corner(hue, 6)
+
+    local open = false
+    btn.Activated:Connect(function()
+        open = not open
+        Utils.set(picker, "Visible", open)
+    end)
+
+    local handle = Control.new(id, "colorpicker", btn, function() return val end, function(v)
+        val = v or Color3.fromRGB(255,255,255)
+        Utils.set(btn, "BackgroundColor3", val)
+        Utils.set(swatch, "BackgroundColor3", val)
+        Utils.set(hexLbl, "Text", Utils.colorToHex(val))
+        Utils.call(callback, val)
+    end, opts)
+    handle.setValue = function(v, silent)
+        val = v
+        Utils.set(btn, "BackgroundColor3", val)
+        Utils.set(swatch, "BackgroundColor3", val)
+        Utils.set(hexLbl, "Text", Utils.colorToHex(val))
+        if not silent then Utils.call(callback, val) end
+        return handle
+    end
+    handle.getValue = function() return val end
+    handle.setDisabled = function(d) Control.setDisabled(handle, d) end
+    handle.setVisible = function(v) Control.setVisible(handle, v) end
+    handle.destroy = function()
+        pcall(function() picker:Destroy() end)
+        Control.destroy(handle)
+    end
+    handle.Destroy = handle.destroy
+    return handle
+end
+registerComponent("ColorPicker", Components.ColorPicker)
+
+-- Keybind
+function Components.Keybind(parent, opts, onChanged)
+    opts = opts or {}
+    local id = opts.Id or Utils.id("keybind")
+    local title = opts.Title or opts.Name or "Tecla"
+    local default = opts.Default or Enum.KeyCode.Unknown
+    local callback = opts.Callback or onChanged or function() end
+
+    local key = default
+    local listening = false
+
+    local btn = Utils.make("TextButton", {
+        Size = UDim2.new(1, 0, 0, 42),
+        BackgroundColor3 = Theme.Current.palette.surface,
+        Text = "",
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 18,
+    }, parent)
+    Utils.corner(btn, Theme.Current.shape.radiusButton)
+    Utils.stroke(btn, Theme.Current.palette.border, 0.3, 1)
+
+    local tLbl = makeLabel(btn, title, UDim2.new(0.6, 0, 0, 18), nil, nil, nil)
+    tLbl.Position = UDim2.fromOffset(14, 8)
+    local kLbl = makeLabel(btn, key == Enum.KeyCode.Unknown and "Desatribuída" or key.Name, UDim2.new(0.4, 0, 0, 18), Theme.Current.palette.textMuted, nil, Enum.TextXAlignment.Right)
+    kLbl.Position = UDim2.fromOffset(14, 8)
+    kLbl.AnchorPoint = Vector2.new(1, 0)
+
+    btn.Activated:Connect(function()
+        listening = true
+        Utils.set(kLbl, "Text", "Pressione uma tecla...")
+        Utils.set(kLbl, "TextColor3", Theme.Current.palette.accent)
+    end)
+
+    local conn
+    if UserInputService then
+        conn = UserInputService.InputBegan:Connect(function(input, processed)
+            if not listening then return end
+            if processed then return end
+            if input.UserInputType == Enum.UserInputType.Keyboard then
+                key = input.KeyCode
+                listening = false
+                Utils.set(kLbl, "Text", key.Name)
+                Utils.set(kLbl, "TextColor3", Theme.Current.palette.textMuted)
+                Utils.call(callback, key)
+            end
+        end)
+    end
+
+    themePart(btn, "surface")
+    themePart(tLbl, "text")
+    themePart(kLbl, "muted")
+    local handle = Control.new(id, "keybind", btn, function() return key end, function(v)
+        key = v or Enum.KeyCode.Unknown
+        Utils.set(kLbl, "Text", key == Enum.KeyCode.Unknown and "Desatribuída" or key.Name)
+    end, opts)
+    handle.setValue = function(v, silent)
+        key = v
+        Utils.set(kLbl, "Text", key == Enum.KeyCode.Unknown and "Desatribuída" or key.Name)
+        if not silent then Utils.call(callback, key) end
+        return handle
+    end
+    handle.getValue = function() return key end
+    handle.setDisabled = function(d) Control.setDisabled(handle, d) end
+    handle.setVisible = function(v) Control.setVisible(handle, v) end
+    handle.destroy = function()
+        if conn then conn:Disconnect() end
+        Control.destroy(handle)
+    end
+    handle.Destroy = handle.destroy
+    return handle
+end
+registerComponent("Keybind", Components.Keybind)
+
+-- Checkbox
+function Components.Checkbox(parent, opts, onChanged)
+    opts = opts or {}
+    local id = opts.Id or Utils.id("checkbox")
+    local title = opts.Title or opts.Name or "Checkbox"
+    local desc = opts.Description or ""
+    local default = opts.Default or false
+    local callback = opts.Callback or onChanged or function() end
+
+    local val = default
+
+    local btn = Utils.make("TextButton", {
+        Size = UDim2.new(1, 0, 0, 36),
+        BackgroundColor3 = Theme.Current.palette.surface,
+        Text = "",
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 18,
+    }, parent)
+    Utils.corner(btn, Theme.Current.shape.radiusButton)
+    Utils.stroke(btn, Theme.Current.palette.border, 0.3, 1)
+
+    local box = Utils.make("Frame", {
+        Position = UDim2.fromOffset(12, 6),
+        Size = UDim2.fromOffset(24, 24),
+        BackgroundColor3 = val and Theme.Current.palette.accent or Color3.fromRGB(255,255,255),
+        BorderSizePixel = 0,
+        ZIndex = 19,
+    }, btn)
+    Utils.corner(box, 6)
+    Utils.stroke(box, Theme.Current.palette.border, 0, 1)
+
+    local check = Utils.make("TextLabel", {
+        Size = UDim2.fromScale(1,1),
+        BackgroundTransparency = 1,
+        Text = val and "✔" or "",
+        TextColor3 = Color3.fromRGB(255,255,255),
+        Font = Theme.Current.typography.bold,
+        TextSize = 16,
+        ZIndex = 20,
+    }, box)
+
+    local tLbl = makeLabel(btn, title, UDim2.new(1, -50, 0, 18), nil, nil, nil)
+    tLbl.Position = UDim2.fromOffset(44, 6)
+    if desc and desc ~= "" then
+        local dLbl = makeLabel(btn, desc, UDim2.new(1, -50, 0, 14), Theme.Current.palette.textMuted, nil, nil)
+        dLbl.Position = UDim2.fromOffset(44, 22)
+        dLbl.TextSize = 11
+    end
+
+    local function set(v)
+        val = v
+        Utils.set(box, "BackgroundColor3", v and Theme.Current.palette.accent or Color3.fromRGB(255,255,255))
+        Utils.set(check, "Text", v and "✔" or "")
+        Utils.call(callback, v)
+    end
+
+    themePart(btn, "surface")
+    themePart(tLbl, "text")
+    btn.Activated:Connect(function() set(not val) end)
+    set(val)
+
+    local handle = Control.new(id, "checkbox", btn, function() return val end, function(v) set(v) end, opts)
+    handle.themeHook = function()
+        Utils.set(box, "BackgroundColor3", val and Theme.Current.palette.accent or Color3.fromRGB(255,255,255))
+    end
+    handle.setValue = function(v, silent)
+        val = v
+        Utils.set(box, "BackgroundColor3", v and Theme.Current.palette.accent or Color3.fromRGB(255,255,255))
+        Utils.set(check, "Text", v and "✔" or "")
+        if not silent then Utils.call(callback, v) end
+        return handle
+    end
+    handle.getValue = function() return val end
+    handle.setDisabled = function(d) Control.setDisabled(handle, d) end
+    handle.setVisible = function(v) Control.setVisible(handle, v) end
+    handle.destroy = function() Control.destroy(handle) end
+    handle.Destroy = handle.destroy
+    return handle
+end
+registerComponent("Checkbox", Components.Checkbox)
+
+-- Label
+function Components.Label(parent, opts)
+    opts = opts or {}
+    local id = opts.Id or Utils.id("label")
+    local text = opts.Text or opts.Title or "Label"
+    local color = opts.Color or Theme.Current.palette.text
+    local size = opts.Size or 13
+    local font = opts.Font or Theme.Current.typography.font
+    local lbl = makeLabel(parent, text, UDim2.new(1, 0, 0, size + 2), color, font, nil)
+    Utils.set(lbl, "TextSize", size)
+    if not opts.Color then themePart(lbl, "text") end
+    local handle = Control.new(id, "label", lbl, function() return lbl.Text end, function(v) lbl.Text = tostring(v) end, opts)
+    handle.setValue = function(v) lbl.Text = tostring(v); return handle end
+    handle.getValue = function() return lbl.Text end
+    handle.destroy = function() Control.destroy(handle) end
+    handle.Destroy = handle.destroy
+    return handle
+end
+registerComponent("Label", Components.Label)
+
+-- Separator
+function Components.Separator(parent, opts)
+    opts = opts or {}
+    local id = opts.Id or Utils.id("separator")
+    local line = Utils.make("Frame", {
+        Size = UDim2.new(1, 0, 0, 1),
+        BackgroundColor3 = Theme.Current.palette.border,
+        BorderSizePixel = 0,
+        ZIndex = 17,
+    }, parent)
+    themePart(line, "border")
+    local handle = Control.new(id, "separator", line, function() return nil end, function() end, opts)
+    handle.destroy = function() Control.destroy(handle) end
+    handle.Destroy = handle.destroy
+    return handle
+end
+registerComponent("Separator", Components.Separator)
+
+-- Paragraph
+function Components.Paragraph(parent, opts)
+    opts = opts or {}
+    local id = opts.Id or Utils.id("paragraph")
+    local text = opts.Text or ""
+    local lbl = makeLabel(parent, text, UDim2.new(1, 0, 0, 40), Theme.Current.palette.textMuted, Theme.Current.typography.font, nil)
+    Utils.set(lbl, "TextWrapped", true)
+    Utils.set(lbl, "TextSize", 13)
+    themePart(lbl, "muted")
+    local handle = Control.new(id, "paragraph", lbl, function() return lbl.Text end, function(v) lbl.Text = tostring(v) end, opts)
+    handle.setValue = function(v) lbl.Text = tostring(v); return handle end
+    handle.destroy = function() Control.destroy(handle) end
+    handle.Destroy = handle.destroy
+    return handle
+end
+registerComponent("Paragraph", Components.Paragraph)
+
+-- Card
+function Components.Card(parent, opts)
+    opts = opts or {}
+    local id = opts.Id or Utils.id("card")
+    local title = opts.Title or ""
+    local desc = opts.Description or ""
+
+    local card = Utils.make("Frame", {
+        Size = UDim2.new(1, 0, 0, 120),
+        BackgroundColor3 = Theme.Current.palette.panel,
+        BorderSizePixel = 0,
+        AutomaticSize = Enum.AutomaticSize.Y,
+        ZIndex = 17,
+    }, parent)
+    Utils.corner(card, Theme.Current.shape.radiusCard)
+    Utils.stroke(card, Theme.Current.palette.border, 0.3, 1)
+    themePart(card, "panel")
+    Utils.list(card, 10)
+    Utils.pad(card, 12, 12, 12, 12)
+
+    if title and title ~= "" then
+        makeLabel(card, title, UDim2.new(1, 0, 0, 20), Theme.Current.palette.text, Theme.Current.typography.bold, nil)
+    end
+    if desc and desc ~= "" then
+        local dLbl = makeLabel(card, desc, UDim2.new(1, 0, 0, 16), Theme.Current.palette.textMuted, Theme.Current.typography.font, nil)
+        Utils.set(dLbl, "TextWrapped", true)
+    end
+
+    local body = Utils.make("Frame", {
+        Size = UDim2.new(1, 0, 0, 0),
+        BackgroundTransparency = 1,
+        AutomaticSize = Enum.AutomaticSize.Y,
+        ZIndex = 18,
+    }, card)
+    Utils.list(body, 8)
+
+    local handle = Control.new(id, "card", card, function() return nil end, function() end, opts)
+    handle.container = body
+    handle.destroy = function() Control.destroy(handle) end
+    handle.Destroy = handle.destroy
+    return handle
+end
+registerComponent("Card", Components.Card)
+
+--==============================================================================
+--  WINDOW SHORTCUTS
+--==============================================================================
+
+function Window:Tab(opts)
+    if type(opts) == "string" then opts = { Title = opts } end
+    return Tab.new(self, opts)
+end
+
+function Window:Section(opts)
+    if type(opts) == "string" then opts = { Title = opts } end
+    local tab = self.tabs[self.tabOrder[1]]
+    if not tab then tab = self:Tab({ Title = "Principal" }) end
+    return Section.new(tab, opts)
+end
+
+function Window:_comp(kind, ...)
+    local args = {...}
+    local tab = self.tabs[self.tabOrder[1]]
+    if not tab then tab = self:Tab({ Title = "Principal" }) end
+    local section = tab.sections[next(tab.sections)] or Section.new(tab, { Title = "Controles" })
+    local body = section.container
+    local first = args[1]
+    local opts, cb
+    if type(first) == "string" then
+        opts = { Title = first }
+        cb = args[2]
+    else
+        opts = first
+        cb = args[2]
+    end
+    if type(opts) == "table" then
+        opts.__tabId = tab.id
+        opts.__sectionId = section.id
+    end
+    local comp = Components.resolve(kind)
+    if not comp then
+        warn("[limui] component type not found: " .. tostring(kind))
+        return nil
+    end
+    return comp(body, opts, cb)
+end
+
+for _, k in ipairs({"Button","Toggle","Slider","Dropdown","Input","ColorPicker","Keybind","Checkbox","Label","Separator","Paragraph","Card"}) do
+    Window[k] = function(self, ...) return self:_comp(k, ...) end
+end
+
+--==============================================================================
+--  NOTIFICATIONS
+--==============================================================================
+
+Notify = {}
+Notify.queue = {}
+Notify.gui = nil
+
+function Notify.init(container)
+    local ng = Utils.make("ScreenGui", {
+        Name = "LimUI_Notifications",
+        ResetOnSpawn = false,
+        IgnoreGuiInset = true,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    }, container)
+    Host.protect(ng)
+    Notify.gui = ng
+    return ng
+end
+
+function Notify.create(opts)
+    opts = opts or {}
+    if not Notify.gui then Notify.init(Host.getContainer()) end
+    local t = Theme.Current
+    local typeColors = {
+        Info    = t.palette.accent,
+        Success = t.palette.success,
+        Warning = t.palette.warning,
+        Error   = t.palette.error,
+    }
+    local color = typeColors[opts.Type or "Info"] or t.palette.accent
+
+    local toast = Utils.make("Frame", {
+        Size = UDim2.new(0, 300, 0, 70),
+        BackgroundColor3 = t.palette.panel,
+        BorderSizePixel = 0,
+        Position = UDim2.new(1, -310, 1, -90),
+        ZIndex = 200,
+        Visible = false,
+    }, Notify.gui)
+    Utils.corner(toast, 12)
+    Utils.stroke(toast, color, 0, 1.5)
+
+    local bar = Utils.make("Frame", {
+        Position = UDim2.fromOffset(0,0),
+        Size = UDim2.fromOffset(4, 0),
+        BackgroundColor3 = color,
+        BorderSizePixel = 0,
+        ZIndex = 201,
+    }, toast)
+    Utils.corner(bar, 2)
+
+    local icon = Utils.make("TextLabel", {
+        Position = UDim2.fromOffset(12, 10),
+        Size = UDim2.fromOffset(24, 24),
+        BackgroundTransparency = 1,
+        Text = opts.Icon or "󰋼",
+        TextColor3 = color,
+        Font = Theme.Current.typography.bold,
+        TextSize = 16,
+        ZIndex = 202,
+    }, toast)
+
+    local tLbl = makeLabel(toast, opts.Title or "Notificação", UDim2.new(1, -70, 0, 20), t.palette.text, Theme.Current.typography.bold, nil)
+    tLbl.Position = UDim2.fromOffset(44, 10)
+    local dLbl = makeLabel(toast, opts.Description or "", UDim2.new(1, -70, 0, 30), t.palette.textMuted, Theme.Current.typography.font, nil)
+    dLbl.Position = UDim2.fromOffset(44, 32)
+    Utils.set(dLbl, "TextWrapped", true)
+
+    table.insert(Notify.queue, toast)
+    Notify.layout()
+
+    toast.Visible = true
+    toast.BackgroundTransparency = 1
+    Motion.animate(toast, { BackgroundTransparency = 0, Position = UDim2.new(1, -310, 1, -90 - (#Notify.queue - 1)*80) }, Motion.duration("Micro"))
+
+    local duration = opts.Duration or 4
+    task.delay(duration, function()
+        Notify.dismiss(toast)
+    end)
+    return toast
+end
+
+function Notify.dismiss(toast)
+    for i, t in ipairs(Notify.queue) do
+        if t == toast then
+            table.remove(Notify.queue, i)
+            break
+        end
+    end
+    Motion.animate(toast, { BackgroundTransparency = 1 }, Motion.duration("Micro"), function()
+        pcall(function() toast:Destroy() end)
+    end)
+    Notify.layout()
+end
+
+function Notify.layout()
+    for i, t in ipairs(Notify.queue) do
+        Motion.animate(t, { Position = UDim2.new(1, -310, 1, -90 - (i-1)*80) }, Motion.duration("Micro"))
+    end
+end
+
+--==============================================================================
+--  SEARCH / COMMAND PALETTE
+--==============================================================================
+
+Search = {}
+Search.gui = nil
+Search.index = {}
+Search.byId = {}
+Search.hotkeyConn = nil
+
+function Search.init(container)
+    local sg = Utils.make("ScreenGui", {
+        Name = "LimUI_Search",
+        ResetOnSpawn = false,
+        IgnoreGuiInset = true,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    }, container)
+    Host.protect(sg)
+    Search.gui = sg
+    return sg
+end
+
+-- Upsert an item into the index (replaces an existing entry with the same id)
+function Search.register(item)
+    if type(item) ~= "table" or not item.id then return nil end
+    local keywords = item.keywords
+    if type(keywords) == "table" then
+        keywords = table.concat(keywords, " ")
+    elseif keywords == nil then
+        keywords = ""
+    end
+    local entry = {
+        id = item.id,
+        title = tostring(item.title or item.id),
+        desc = tostring(item.desc or item.description or ""),
+        keywords = tostring(keywords),
+        aliases = item.aliases or "",
+        tabId = item.tabId,
+        sectionId = item.sectionId,
+        controlId = item.controlId,
+        type = item.type or "command",
+        action = item.action,
+        run = item.run,
+        hidden = item.hidden or false,
+    }
+    if Search.byId[entry.id] then
+        local idx = Search.byId[entry.id]
+        Search.index[idx] = entry
+    else
+        table.insert(Search.index, entry)
+        Search.byId[entry.id] = #Search.index
+    end
+    return entry.id
+end
+
+function Search.unregister(id)
+    local idx = Search.byId[id]
+    if not idx then return false end
+    table.remove(Search.index, idx)
+    Search.byId[id] = nil
+    -- reindex
+    for i, it in ipairs(Search.index) do Search.byId[it.id] = i end
+    return true
+end
+
+function Search.clear()
+    Search.index = {}
+    Search.byId = {}
+end
+
+-- Index every tab/section/control of a window
+function Search.indexWindow(window)
+    for _, tab in pairs(window.tabs) do
+        Search.register({
+            id = "tab:" .. tab.id,
+            title = tab.title,
+            desc = tab.desc or "Aba",
+            keywords = table.concat({ tab.title, tab.desc or "", tab.id }, " "),
+            aliases = tab.id,
+            tabId = tab.id,
+            type = "tab",
+        })
+        for _, sec in pairs(tab.sections) do
+            Search.register({
+                id = "section:" .. sec.id,
+                title = sec.title,
+                desc = sec.desc or "Seção",
+                keywords = table.concat({ sec.title, sec.desc or "" }, " "),
+                tabId = tab.id,
+                sectionId = sec.id,
+                type = "section",
+            })
+        end
+    end
+end
+
+-- Scoring: exact > prefix > word-start > substring
+local function scoreEntry(entry, query)
+    if query == "" then return 1 end
+    local title = Utils.normalizeText(entry.title)
+    local hay = Utils.normalizeText(entry.title .. " " .. entry.desc .. " " ..
+        entry.keywords .. " " .. tostring(entry.aliases or ""))
+    if title == query then return 100 end
+    if string.sub(title, 1, #query) == query then return 80 end
+    for word in string.gmatch(hay, "%S+") do
+        if string.sub(word, 1, #query) == query then return 50 end
+    end
+    if string.find(hay, query, 1, true) then return 20 end
+    return 0
+end
+
+function Search.query(text, limit)
+    local norm = Utils.normalizeText(text or "")
+    local scored = {}
+    for _, entry in ipairs(Search.index) do
+        if not entry.hidden then
+            local s = scoreEntry(entry, norm)
+            if s > 0 then table.insert(scored, { entry = entry, score = s }) end
+        end
+    end
+    table.sort(scored, function(a, b)
+        if a.score ~= b.score then return a.score > b.score end
+        return a.entry.title < b.entry.title
+    end)
+    local out = {}
+    for i, item in ipairs(scored) do
+        if i > (limit or 50) then break end
+        table.insert(out, item.entry)
+    end
+    return out
+end
+
+-- Global hotkey: Ctrl+K opens the palette (skipped while typing in a TextBox)
+function Search.installHotkey(window)
+    if Search.hotkeyConn or not UserInputService then return end
+    Search.hotkeyConn = UserInputService.InputBegan:Connect(function(input, processed)
+        if processed then return end
+        local isCtrlK = (input.KeyCode == Enum.KeyCode.K) and
+            (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl))
+        if not isCtrlK then return end
+        -- never hijack while the user is typing
+        local focused = UserInputService:GetFocusedTextBox()
+        if focused then return end
+        Search.openPalette(window)
+    end)
+end
+
+function Search.openPalette(window)
+    if not Search.gui then Search.init(Host.getContainer()) end
+    local container = Search.gui
+    for _, c in ipairs(container:GetChildren()) do if c.Name == "Palette" then c:Destroy() end end
+
+    local palette = Utils.make("Frame", {
+        Name = "Palette",
+        Size = UDim2.fromOffset(460, 300),
+        Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundColor3 = Theme.Current.palette.panel,
+        BorderSizePixel = 0,
+        ClipsDescendants = true,
+        ZIndex = 300,
+    }, container)
+    Utils.corner(palette, 16)
+    Utils.stroke(palette, Theme.Current.palette.border, 0.2, 1.5)
+
+    local input = Utils.make("TextBox", {
+        Position = UDim2.fromOffset(16, 14),
+        Size = UDim2.new(1, -32, 0, 38),
+        BackgroundColor3 = Theme.Current.palette.surface,
+        Text = "",
+        PlaceholderText = "Buscar abas, controles, comandos...",
+        PlaceholderColor3 = Theme.Current.palette.placeholder,
+        TextColor3 = Theme.Current.palette.text,
+        Font = Theme.Current.typography.font,
+        TextSize = 14,
+        ClearTextOnFocus = false,
+        ZIndex = 301,
+    }, palette)
+    Utils.corner(input, 10)
+    Utils.stroke(input, Theme.Current.palette.border, 0.3, 1)
+    Utils.pad(input, 0, 12, 0, 12)
+
+    local results = Utils.make("ScrollingFrame", {
+        Position = UDim2.fromOffset(16, 60),
+        Size = UDim2.new(1, -32, 1, -76),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 4,
+        ScrollBarImageColor3 = Theme.Current.palette.accent,
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        CanvasSize = UDim2.new(),
+        ZIndex = 301,
+    }, palette)
+    Utils.list(results, 6)
+
+    local emptyLbl = Utils.make("TextLabel", {
+        Position = UDim2.fromOffset(8, 8),
+        Size = UDim2.new(1, -16, 0, 60),
+        BackgroundTransparency = 1,
+        Text = "Digite para buscar abas, controles e comandos.",
+        TextColor3 = Theme.Current.palette.textMuted,
+        Font = Theme.Current.typography.font,
+        TextSize = 12,
+        TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Center,
+        ZIndex = 302,
+    }, results)
+
+    local buttons = {}
+    local selectedIndex = 0
+
+    local function clearResults()
+        for _, c in ipairs(results:GetChildren()) do
+            if c:IsA("TextButton") then c:Destroy() end
+        end
+        buttons = {}
+        selectedIndex = 0
+    end
+
+    local function highlight(index)
+        for i, b in ipairs(buttons) do
+            Utils.set(b, "BackgroundColor3", i == index and Theme.Current.palette.accent or Theme.Current.palette.surface)
+            local lbl = b:FindFirstChild("ResultTitle")
+            if lbl then
+                Utils.set(lbl, "TextColor3", i == index and Color3.fromRGB(255,255,255) or Theme.Current.palette.text)
+            end
+        end
+        selectedIndex = index
+    end
+
+    local function activate(index)
+        local b = buttons[index]
+        if not b then return end
+        local entry = b:GetAttribute("Entry")
+        if entry then
+            if entry.tabId and window then window:GoTo(entry.tabId) end
+            local action = entry.action or entry.run
+            if action then Utils.call(action) end
+        end
+        pcall(function() palette:Destroy() end)
+        if conn then conn:Disconnect() end
+    end
+
+    local function build(query)
+        clearResults()
+        local entries = Search.query(query, 40)
+        if #entries == 0 then
+            emptyLbl.Visible = true
+            emptyLbl.Text = query ~= "" and "Nenhum resultado para \"" .. query .. "\"." or "Digite para buscar abas, controles e comandos."
+            return
+        end
+        emptyLbl.Visible = false
+        for i, entry in ipairs(entries) do
+            local b = Utils.make("TextButton", {
+                Size = UDim2.new(1, -8, 0, 40),
+                BackgroundColor3 = Theme.Current.palette.surface,
+                Text = "",
+                AutoButtonColor = false,
+                BorderSizePixel = 0,
+                ZIndex = 302,
+            }, results)
+            Utils.corner(b, 8)
+            Utils.stroke(b, Theme.Current.palette.border, 0.2, 1)
+            b:SetAttribute("Entry", entry)
+
+            local typeIcon = entry.type == "tab" and "layout" or (entry.type == "section" and "folder" or "play")
+            Icons.draw(b, typeIcon, 16, Theme.Current.palette.accent).Position = UDim2.fromOffset(10, 12)
+
+            local lbl = Utils.make("TextLabel", {
+                Name = "ResultTitle",
+                Position = UDim2.fromOffset(34, 4),
+                Size = UDim2.new(1, -44, 0, 18),
+                BackgroundTransparency = 1,
+                Text = entry.title,
+                TextColor3 = Theme.Current.palette.text,
+                Font = Theme.Current.typography.bold,
+                TextSize = 13,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 303,
+            }, b)
+            local sub = Utils.make("TextLabel", {
+                Position = UDim2.fromOffset(34, 22),
+                Size = UDim2.new(1, -44, 0, 14),
+                BackgroundTransparency = 1,
+                Text = entry.desc,
+                TextColor3 = Theme.Current.palette.textMuted,
+                Font = Theme.Current.typography.font,
+                TextSize = 10,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 303,
+            }, b)
+            b.Activated:Connect(function() activate(i) end)
+            buttons[i] = b
+        end
+        if #buttons > 0 then highlight(1) end
+    end
+    build("")
+
+    local debounceConn
+    input:GetPropertyChangedSignal("Text"):Connect(function()
+        if debounceConn then debounceConn:Disconnect() end
+        debounceConn = task.delay(0.08, function()
+            build(input.Text)
+        end)
+    end)
+
+    task.defer(function()
+        if palette.Parent then input:CaptureFocus() end
+    end)
+
+    -- Keyboard: arrows, enter, escape
+    local conn
+    if UserInputService then
+        conn = UserInputService.InputBegan:Connect(function(inputObj, processed)
+            if not palette.Parent then
+                if conn then conn:Disconnect() end
+                return
+            end
+            if inputObj.KeyCode == Enum.KeyCode.Escape then
+                pcall(function() palette:Destroy() end)
+                if conn then conn:Disconnect() end
+            elseif inputObj.KeyCode == Enum.KeyCode.Down then
+                highlight(math.min(selectedIndex + 1, #buttons))
+            elseif inputObj.KeyCode == Enum.KeyCode.Up then
+                highlight(math.max(selectedIndex - 1, 1))
+            elseif inputObj.KeyCode == Enum.KeyCode.Return then
+                activate(selectedIndex)
+            end
+        end)
+    end
+end
+
+--==============================================================================
+--  THEME STUDIO
+--==============================================================================
+
+ThemeStudio = {}
+ThemeStudio.gui = nil
+
+function ThemeStudio.open(window)
+    if ThemeStudio.gui then pcall(function() ThemeStudio.gui:Destroy() end) end
+    local container = Host.getContainer()
+    local sg = Utils.make("ScreenGui", {
+        Name = "LimUI_ThemeStudio",
+        ResetOnSpawn = false,
+        IgnoreGuiInset = true,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    }, container)
+    Host.protect(sg)
+    ThemeStudio.gui = sg
+
+    local t = Theme.Current
+
+    local studio = Utils.make("Frame", {
+        Size = UDim2.fromOffset(660, 560),
+        Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundColor3 = t.palette.panel,
+        BorderSizePixel = 0,
+        ClipsDescendants = true,
+        ZIndex = 400,
+    }, sg)
+    Utils.corner(studio, 20)
+    Utils.stroke(studio, t.palette.border, 0.2, 1.5)
+
+    local header = Utils.make("Frame", {
+        Size = UDim2.new(1, 0, 0, 46),
+        BackgroundColor3 = t.palette.surface,
+        BorderSizePixel = 0,
+        ZIndex = 401,
+    }, studio)
+    Utils.corner(header, 20)
+    local hb = Utils.make("Frame", {
+        Position = UDim2.new(0,0,1,-16),
+        Size = UDim2.new(1,0,0,16),
+        BackgroundColor3 = t.palette.surface,
+        BorderSizePixel = 0,
+        ZIndex = 401,
+    }, header)
+
+    makeLabel(header, "Theme Studio", UDim2.new(1, -80, 1, 0), t.palette.text, Theme.Current.typography.bold, nil)
+    local close = Utils.make("TextButton", {
+        Position = UDim2.new(1, -10, 0, 8),
+        Size = UDim2.fromOffset(30, 30),
+        BackgroundColor3 = t.palette.error,
+        Text = "×",
+        TextColor3 = Color3.fromRGB(255,255,255),
+        Font = Theme.Current.typography.bold,
+        TextSize = 20,
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 402,
+    }, header)
+    Utils.corner(close, 8)
+    close.Activated:Connect(function() pcall(function() sg:Destroy() end) end)
+
+    local body = Utils.make("ScrollingFrame", {
+        Position = UDim2.fromOffset(16, 60),
+        Size = UDim2.new(1, -32, 1, -76),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 4,
+        ScrollBarImageColor3 = t.palette.accent,
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        CanvasSize = UDim2.new(),
+        ZIndex = 401,
+    }, studio)
+    Utils.list(body, 10)
+    Utils.pad(body, 0, 0, 16, 0)
+
+    -- Color picker row
+    local function colorRow(label, key, section)
+        local row = Utils.make("Frame", {
+            Size = UDim2.new(1, 0, 0, 42),
+            BackgroundTransparency = 1,
+            ZIndex = 402,
+        }, body)
+        makeLabel(row, label, UDim2.new(0.5, 0, 0, 18), t.palette.text, nil, nil)
+        makeLabel(row, Utils.colorToHex(t[section][key]), UDim2.new(0.5, 0, 0, 14), Theme.Current.palette.textMuted, nil, Enum.TextXAlignment.Right)
+
+        local swatch = Utils.make("Frame", {
+            Position = UDim2.new(1, -130, 0, 6),
+            Size = UDim2.fromOffset(28, 28),
+            BackgroundColor3 = t[section][key],
+            BorderSizePixel = 0,
+            ZIndex = 403,
+        }, row)
+        Utils.corner(swatch, 7)
+        Utils.stroke(swatch, t.palette.border, 0, 1)
+
+        local pickerBtn = Utils.make("TextButton", {
+            Position = UDim2.new(1, -96, 0, 6),
+            Size = UDim2.fromOffset(24, 24),
+            BackgroundColor3 = t.palette.surface,
+            Text = "◉",
+            TextColor3 = t.palette.text,
+            Font = Theme.Current.typography.bold,
+            TextSize = 14,
+            AutoButtonColor = false,
+            BorderSizePixel = 0,
+            ZIndex = 403,
+        }, row)
+        Utils.corner(pickerBtn, 6)
+
+        pickerBtn.Activated:Connect(function()
+            -- Cycle through preset colors for demo; real picker uses hex input
+            local colors = { Color3.fromRGB(255,0,0), Color3.fromRGB(0,255,0), Color3.fromRGB(0,0,255),
+                           Color3.fromRGB(255,255,0), Color3.fromRGB(255,0,255), Color3.fromRGB(0,255,255),
+                           t[section][key] }
+            local idx = 1
+            for i, c in ipairs(colors) do
+                if c == t[section][key] then idx = i end
+            end
+            local new = colors[(idx % #colors) + 1]
+            t[section][key] = new
+            Utils.set(swatch, "BackgroundColor3", new)
+            local hexLbl = row:FindFirstChildOfClass("TextLabel")
+            -- update theme and propagate
+            Theme.propagate()
+            window:refreshTheme()
+        end)
+    end
+
+    colorRow("Acento", "accent", "palette")
+    colorRow("Fundo", "background", "palette")
+    colorRow("Painel", "panel", "palette")
+    colorRow("Texto", "text", "palette")
+    colorRow("Texto Mudo", "textMuted", "palette")
+    colorRow("Ícone", "icon", "palette")
+
+    -- Glass material
+    local glassRow = Utils.make("Frame", {
+        Size = UDim2.new(1, 0, 0, 36),
+        BackgroundTransparency = 1,
+        ZIndex = 402,
+    }, body)
+    makeLabel(glassRow, "Material Vidro", UDim2.new(0.5, 0, 1, 0), t.palette.text, nil, nil)
+    local matBtn = Utils.make("TextButton", {
+        Position = UDim2.new(1, -130, 0, 6),
+        Size = UDim2.fromOffset(110, 24),
+        BackgroundColor3 = t.palette.surface,
+        Text = t.glass.material,
+        TextColor3 = t.palette.text,
+        Font = Theme.Current.typography.font,
+        TextSize = 12,
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 403,
+    }, glassRow)
+    Utils.corner(matBtn, 6)
+    local mats = {"Clear","Frosted","Deep","Prismatic","Solid"}
+    matBtn.Activated:Connect(function()
+        local cur = t.glass.material
+        local idx = 1
+        for i, m in ipairs(mats) do if m == cur then idx = i end end
+        local m = mats[(idx % #mats) + 1]
+        Utils.set(matBtn, "Text", m)
+        window:setGlass(m)
+    end)
+
+    -- Quality
+    local qRow = Utils.make("Frame", {
+        Size = UDim2.new(1, 0, 0, 36),
+        BackgroundTransparency = 1,
+        ZIndex = 402,
+    }, body)
+    makeLabel(qRow, "Qualidade", UDim2.new(0.5, 0, 1, 0), t.palette.text, nil, nil)
+    local qBtn = Utils.make("TextButton", {
+        Position = UDim2.new(1, -130, 0, 6),
+        Size = UDim2.fromOffset(110, 24),
+        BackgroundColor3 = t.palette.surface,
+        Text = t.Quality,
+        TextColor3 = t.palette.text,
+        Font = Theme.Current.typography.font,
+        TextSize = 12,
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 403,
+    }, qRow)
+    Utils.corner(qBtn, 6)
+    local qs = {"Eco","Balanced","Premium"}
+    qBtn.Activated:Connect(function()
+        local cur = t.Quality
+        local idx = 1
+        for i, q in ipairs(qs) do if q == cur then idx = i end end
+        local q = qs[(idx % #qs) + 1]
+        Utils.set(qBtn, "Text", q)
+        window:setQuality(q)
+    end)
+
+    -- Motion
+    local mRow = Utils.make("Frame", {
+        Size = UDim2.new(1, 0, 0, 36),
+        BackgroundTransparency = 1,
+        ZIndex = 402,
+    }, body)
+    makeLabel(mRow, "Movimento", UDim2.new(0.5, 0, 1, 0), t.palette.text, nil, nil)
+    local mBtn = Utils.make("TextButton", {
+        Position = UDim2.new(1, -130, 0, 6),
+        Size = UDim2.fromOffset(110, 24),
+        BackgroundColor3 = t.palette.surface,
+        Text = t.motion.preset,
+        TextColor3 = t.palette.text,
+        Font = Theme.Current.typography.font,
+        TextSize = 12,
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 403,
+    }, mRow)
+    Utils.corner(mBtn, 6)
+    local ms = {"Elegant","Dynamic","Instant","SoftSpring","Reduced"}
+    mBtn.Activated:Connect(function()
+        local cur = t.motion.preset
+        local idx = 1
+        for i, mv in ipairs(ms) do if mv == cur then idx = i end end
+        local mv = ms[(idx % #ms) + 1]
+        Utils.set(mBtn, "Text", mv)
+        window:setMotion(mv)
+    end)
+
+    -- Reduced Motion toggle
+    local rmRow = Utils.make("Frame", {
+        Size = UDim2.new(1, 0, 0, 36),
+        BackgroundTransparency = 1,
+        ZIndex = 402,
+    }, body)
+    makeLabel(rmRow, "Reduced Motion", UDim2.new(0.5, 0, 1, 0), t.palette.text, nil, nil)
+    local rmBtn = Utils.make("TextButton", {
+        Position = UDim2.new(1, -130, 0, 6),
+        Size = UDim2.fromOffset(110, 24),
+        BackgroundColor3 = t.palette.surface,
+        Text = tostring(t.accessibility.reducedMotion),
+        TextColor3 = t.palette.text,
+        Font = Theme.Current.typography.font,
+        TextSize = 12,
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 403,
+    }, rmRow)
+    Utils.corner(rmBtn, 6)
+    rmBtn.Activated:Connect(function()
+        t.accessibility.reducedMotion = not t.accessibility.reducedMotion
+        Utils.set(rmBtn, "Text", tostring(t.accessibility.reducedMotion))
+    end)
+end
+
+--==============================================================================
+--  PUBLIC API FACADE
+--==============================================================================
+
+function limui:Window(opts)
+    return Window.new(opts or {})
+end
+
+function limui:GetWindow(id)
+    return WindowMgr.get(id)
+end
+
+function limui:GetVersion()
+    return limui.Version
+end
+
+function limui:GetCapabilities()
+    return Capabilities
+end
+
+function limui:SetTheme(theme)
+    Theme.apply(theme)
+end
+
+function limui:SetQuality(level)
+    Theme.Quality = level
+end
+
+function limui:SetMotion(preset)
+    Theme.Motion = preset
+end
+
+function limui:Notify(opts)
+    return Notify.create(opts)
+end
+
+function limui:DestroyAll()
+    WindowMgr.destroyAll()
+    Motion.cancelAll()
+end
+
+--==============================================================================
+--  WINDOW RESIZE & MINIMIZE MODES
+--==============================================================================
+
+-- Minimized presentations: FloatingButton / Dock / CompactBar / Auto
+function Window:_buildMinimizePresentations()
+    if self._minPresentationsBuilt then return end
+    self._minPresentationsBuilt = true
+    local t = Theme.Current
+
+    -- CompactBar: small bar with logo, title, restore action
+    self.minBar = Utils.make("TextButton", {
+        Name = "MinimizeBar",
+        Size = UDim2.fromOffset(260, 40),
+        Position = UDim2.fromOffset(20, 20),
+        BackgroundColor3 = t.palette.panel,
+        Text = "",
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        Visible = false,
+        ZIndex = 50,
+    }, self.gui)
+    Utils.corner(self.minBar, 12)
+    Utils.stroke(self.minBar, t.palette.accent, 0, 1.5)
+    Utils.make("TextLabel", {
+        Position = UDim2.fromOffset(12, 0),
+        Size = UDim2.new(1, -50, 1, 0),
+        BackgroundTransparency = 1,
+        Text = self.title,
+        TextColor3 = t.palette.text,
+        Font = t.typography.bold,
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 51,
+    }, self.minBar)
+    Utils.make("TextLabel", {
+        Position = UDim2.new(1, -34, 0, 8),
+        Size = UDim2.fromOffset(22, 22),
+        BackgroundTransparency = 1,
+        Text = "≡",
+        TextColor3 = t.palette.accent,
+        Font = t.typography.bold,
+        TextSize = 18,
+        ZIndex = 51,
+    }, self.minBar)
+    Motion.hover(self.minBar, t.palette.hover, t.palette.panel)
+    self.minBar.Activated:Connect(function() self:Restore() end)
+
+    -- Dock: vertical strip anchored to the left edge
+    self.minDock = Utils.make("Frame", {
+        Name = "MinimizeDock",
+        Size = UDim2.fromOffset(52, 220),
+        Position = UDim2.fromOffset(12, 0.5),
+        AnchorPoint = Vector2.new(0, 0.5),
+        BackgroundColor3 = t.palette.panel,
+        BorderSizePixel = 0,
+        Visible = false,
+        ZIndex = 50,
+    }, self.gui)
+    Utils.corner(self.minDock, 16)
+    Utils.stroke(self.minDock, t.palette.accent, 0, 1.5)
+    local dockIcon = Utils.make("TextButton", {
+        Position = UDim2.fromOffset(8, 8),
+        Size = UDim2.fromOffset(36, 36),
+        BackgroundColor3 = t.palette.surface,
+        Text = "≡",
+        TextColor3 = t.palette.accent,
+        Font = t.typography.bold,
+        TextSize = 18,
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 51,
+    }, self.minDock)
+    Utils.corner(dockIcon, 10)
+    Motion.hover(dockIcon, t.palette.hover, t.palette.surface)
+    dockIcon.Activated:Connect(function() self:Restore() end)
+    local dockLabel = Utils.make("TextLabel", {
+        Position = UDim2.new(0, 0, 0, 50),
+        Size = UDim2.new(1, 0, 0, 150),
+        BackgroundTransparency = 1,
+        Text = self.title,
+        TextColor3 = t.palette.textMuted,
+        Font = t.typography.font,
+        TextSize = 11,
+        TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Center,
+        ZIndex = 51,
+    }, self.minDock)
+
+    -- Floating button supports an optional custom asset id
+    local minAsset = self.opts.Minimize and self.opts.Minimize.iconAsset
+    if not minAsset and self.opts.Minimize then minAsset = self.opts.Minimize.DefaultIcon end
+    if minAsset and minAsset ~= "" then
+        local img = self.minGui:FindFirstChildOfClass("TextLabel")
+        if img then img:Destroy() end
+        Utils.make("ImageLabel", {
+            Position = UDim2.fromOffset(6, 6),
+            Size = UDim2.fromOffset(44, 44),
+            BackgroundTransparency = 1,
+            Image = minAsset,
+            ScaleType = Enum.ScaleType.Fit,
+            ZIndex = 51,
+        }, self.minGui)
+    end
+end
+
+function Window:Resize(width, height)
+    if self.destroyed then return end
+    width = math.clamp(width or 780, 320, 1600)
+    height = math.clamp(height or 520, 240, 1000)
+    self._size = { width = width, height = height }
+    Motion.animate(self.main, { Size = UDim2.fromOffset(width, height) }, Motion.duration("Standard"))
+    Motion.animate(self.shadow, { Size = UDim2.fromOffset(width + 8, height + 8) }, Motion.duration("Standard"))
+end
+
+function Window:_minimizeMode()
+    local mode = (self.opts.Minimize and self.opts.Minimize.mode) or "CompactBar"
+    if mode == "Auto" then
+        -- Auto picks by viewport + input, never by device name
+        local cam = Workspace and Workspace.CurrentCamera
+        local vp = cam and cam.ViewportSize or Vector2.new(1920, 1080)
+        if vp.X < 900 or IsMobile then mode = "CompactBar" else mode = "FloatingButton" end
+    end
+    return mode
+end
+
+function Window:setMinimizeMode(mode)
+    self.opts.Minimize = self.opts.Minimize or {}
+    self.opts.Minimize.mode = mode
+    self:_buildMinimizePresentations()
+    if self.minimized then
+        self:_showMinimizePresentation()
+    end
+end
+
+function Window:_hideMinimizePresentations()
+    if self.minGui then self.minGui.Visible = false end
+    if self.minBar then self.minBar.Visible = false end
+    if self.minDock then self.minDock.Visible = false end
+end
+
+function Window:_showMinimizePresentation()
+    self:_buildMinimizePresentations()
+    local mode = self:_minimizeMode()
+    self:_hideMinimizePresentations()
+    if mode == "CompactBar" then
+        self.minBar.Visible = true
+        Motion.animate(self.minBar, { Position = UDim2.fromOffset(20, 20) }, Motion.duration("Emphasis"))
+    elseif mode == "Dock" then
+        self.minDock.Visible = true
+        Motion.animate(self.minDock, { Position = UDim2.fromOffset(12, 0.5) }, Motion.duration("Emphasis"))
+    else -- FloatingButton
+        self.minGui.Visible = true
+        Motion.animate(self.minGui, { Position = self.minGui.Position }, Motion.duration("Emphasis"))
+    end
+end
+
+function Window:Minimize()
+    if self.destroyed or self.minimized then return end
+    self.minimized = true
+    self._size = { width = self.main.Size.X.Offset, height = self.main.Size.Y.Offset }
+    Motion.animate(self.main, {
+        Size = UDim2.fromOffset(0, 0),
+        BackgroundTransparency = 1,
+    }, Motion.duration("Emphasis"))
+    Motion.animate(self.shadow, { BackgroundTransparency = 1 }, Motion.duration("Emphasis"))
+    task.delay(Motion.duration("Emphasis"), function()
+        if self.destroyed or not self.minimized then return end
+        self.main.Visible = false
+        self.shadow.Visible = false
+        self:_showMinimizePresentation()
+    end)
+    WindowMgr.focus(self)
+end
+
+function Window:Restore()
+    if self.destroyed or not self.minimized then return end
+    self.minimized = false
+    self:_hideMinimizePresentations()
+    self.main.Visible = true
+    self.shadow.Visible = true
+    local size = self._size or { width = 780, height = 520 }
+    Motion.animate(self.main, {
+        Size = UDim2.fromOffset(size.width, size.height),
+        BackgroundTransparency = Theme.Current.glass.opacity,
+    }, Motion.duration("Emphasis"))
+    Motion.animate(self.shadow, {
+        Size = UDim2.fromOffset(size.width + 8, size.height + 8),
+        BackgroundTransparency = 0.5,
+    }, Motion.duration("Emphasis"))
+    WindowMgr.focus(self)
+end
+
+--==============================================================================
+--  TOOLTIP SYSTEM
+--==============================================================================
+
+TooltipSystem = {}
+TooltipSystem.current = nil
+TooltipSystem.gui = nil
+
+function TooltipSystem.init(container)
+    local tg = Utils.make("ScreenGui", {
+        Name = "LimUI_Tooltips",
+        ResetOnSpawn = false,
+        IgnoreGuiInset = true,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    }, container)
+    Host.protect(tg)
+    TooltipSystem.gui = tg
+    return tg
+end
+
+function TooltipSystem.show(instance, text, delay)
+    delay = delay or 0.5
+    if TooltipSystem.current then TooltipSystem.hide() end
+    task.delay(delay, function()
+        if not instance or not instance.Parent then return end
+        if not TooltipSystem.gui then TooltipSystem.init(Host.getContainer()) end
+        local t = Theme.Current
+        local tip = Utils.make("Frame", {
+            Name = "Tooltip",
+            Size = UDim2.new(0, math.max(100, #text * 7 + 20), 0, 26),
+            BackgroundColor3 = t.palette.background,
+            BorderSizePixel = 0,
+            ZIndex = 999,
+            Visible = false,
+        }, TooltipSystem.gui)
+        Utils.corner(tip, 6)
+        Utils.stroke(tip, t.palette.border, 0, 1)
+        local lbl = makeLabel(tip, text, UDim2.new(1, -10, 1, 0), t.palette.text, Theme.Current.typography.font, nil)
+        lbl.Position = UDim2.fromOffset(5, 0)
+        lbl.TextSize = 11
+
+        local abs = instance.AbsolutePosition
+        tip.Position = UDim2.fromOffset(abs.X, abs.Y - 36)
+        tip.Visible = true
+        tip.BackgroundTransparency = 1
+        Motion.animate(tip, { BackgroundTransparency = 0 }, Motion.duration("Micro"))
+        TooltipSystem.current = tip
+    end)
+end
+
+function TooltipSystem.hide()
+    if TooltipSystem.current then
+        Motion.animate(TooltipSystem.current, { BackgroundTransparency = 1 }, Motion.duration("Micro"), function()
+            pcall(function() TooltipSystem.current:Destroy() end)
+            TooltipSystem.current = nil
+        end)
+    end
+end
+
+--==============================================================================
+--  FAVORITES SYSTEM
+--==============================================================================
+
+Favorites = {}
+Favorites.items = {}
+Favorites.gui = nil
+
+function Favorites.add(id, title, icon, tabId)
+    if Favorites.items[id] then return end
+    Favorites.items[id] = { id = id, title = title, icon = icon, tabId = tabId }
+    Persist.write("favorites", Favorites.items)
+end
+
+function Favorites.remove(id)
+    Favorites.items[id] = nil
+    Persist.write("favorites", Favorites.items)
+end
+
+function Favorites.get(id)
+    return Favorites.items[id]
+end
+
+function Favorites.list()
+    return Favorites.items
+end
+
+function Favorites.load()
+    local data = Persist.read("favorites")
+    if data then Favorites.items = data end
+end
+
+--==============================================================================
+--  CONTEXT MENU SYSTEM
+--============================================================================--
+
+local ContextMenu = {}
+ContextMenu.current = nil
+
+function ContextMenu.open(instance, items, x, y)
+    if ContextMenu.current then ContextMenu.close() end
+    local t = Theme.Current
+    local menu = Utils.make("Frame", {
+        Name = "ContextMenu",
+        Size = UDim2.new(0, 160, 0, #items * 30 + 10),
+        Position = UDim2.fromOffset(x or 0, y or 0),
+        BackgroundColor3 = t.palette.panel,
+        BorderSizePixel = 0,
+        ClipsDescendants = true,
+        ZIndex = 500,
+    }, Overlay.topGui or Host.getContainer())
+    Utils.corner(menu, 8)
+    Utils.stroke(menu, t.palette.border, 0.2, 1.5)
+    Utils.list(menu, 4)
+    Utils.pad(menu, 6, 6, 6, 6)
+
+    for _, item in ipairs(items) do
+        local btn = Utils.make("TextButton", {
+            Size = UDim2.new(1, -12, 0, 28),
+            BackgroundColor3 = t.palette.surface,
+            Text = item.title or "Item",
+            TextColor3 = t.palette.text,
+            Font = Theme.Current.typography.font,
+            TextSize = 12,
+            AutoButtonColor = false,
+            BorderSizePixel = 0,
+            ZIndex = 501,
+        }, menu)
+        Utils.corner(btn, 6)
+        Utils.stroke(btn, t.palette.border, 0.3, 1)
+        Motion.hover(btn, t.palette.hover, t.palette.surface)
+        btn.Activated:Connect(function()
+            if item.action then Utils.call(item.action) end
+            ContextMenu.close()
+        end)
+    end
+
+    ContextMenu.current = menu
+end
+
+function ContextMenu.close()
+    if ContextMenu.current then
+        pcall(function() ContextMenu.current:Destroy() end)
+        ContextMenu.current = nil
+    end
+end
+
+--==============================================================================
+--  WIDGET DASHBOARD ENGINE
+--
+--  Optional, fully independent from any game. The host registers widgets
+--  through the public API; the user can add/remove/reorder them at runtime.
+--  Built-in widgets are generic (profile, session, server stats) and only
+--  appear when explicitly enabled.
+--==============================================================================
+
+WidgetEngine = {}
+WidgetEngine.registry = {}      -- [id] = definition
+WidgetEngine.instances = {}     -- [instanceId] = live instance
+WidgetEngine.order = {}         -- array of instanceIds (user ordering)
+WidgetEngine.enabled = false
+WidgetEngine.window = nil
+WidgetEngine.dashboardTab = nil
+WidgetEngine.editing = false
+
+-- Built-in generic widgets (never game-specific)
+local function buildBuiltinWidgets()
+    -- Player Profile
+    WidgetEngine.register({
+        Id = "limui.profile",
+        Title = "Perfil",
+        Description = "Nome e avatar do jogador local.",
+        Icon = "user",
+        DefaultSize = { Columns = 2, Rows = 1 },
+        BuiltIn = true,
+        Render = function(ctx)
+            local player = LocalPlayer
+            local frame = Utils.make("Frame", {
+                Size = UDim2.new(1, 0, 0, 80),
+                BackgroundTransparency = 1,
+                BorderSizePixel = 0,
+                ZIndex = 18,
+            })
+            local avatar = Utils.make("ImageLabel", {
+                Position = UDim2.fromOffset(12, 12),
+                Size = UDim2.fromOffset(56, 56),
+                BackgroundColor3 = Theme.Current.palette.surface,
+                BackgroundTransparency = 0,
+                Image = "",
+                ScaleType = Enum.ScaleType.Crop,
+                BorderSizePixel = 0,
+                ZIndex = 19,
+            }, frame)
+            Utils.corner(avatar, 28)
+            Utils.stroke(avatar, Theme.Current.palette.border, 0, 1)
+            if player then
+                pcall(function()
+                    local thumb = Players:GetUserThumbnailAsync(player.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
+                    avatar.Image = thumb
+                end)
+            end
+            Utils.make("TextLabel", {
+                Position = UDim2.fromOffset(80, 22),
+                Size = UDim2.new(1, -92, 0, 20),
+                BackgroundTransparency = 1,
+                Text = player and player.DisplayName or "Jogador",
+                TextColor3 = Theme.Current.palette.text,
+                Font = Theme.Current.typography.bold,
+                TextSize = 15,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 19,
+            }, frame)
+            Utils.make("TextLabel", {
+                Position = UDim2.fromOffset(80, 44),
+                Size = UDim2.new(1, -92, 0, 16),
+                BackgroundTransparency = 1,
+                Text = player and ("@" .. player.Name) or "@desconhecido",
+                TextColor3 = Theme.Current.palette.textMuted,
+                Font = Theme.Current.typography.font,
+                TextSize = 11,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 19,
+            }, frame)
+            return frame
+        end,
+    })
+
+    -- Server Stats
+    WidgetEngine.register({
+        Id = "limui.serverstats",
+        Title = "Servidor",
+        Description = "Jogadores conectados e capacidade.",
+        Icon = "users",
+        DefaultSize = { Columns = 1, Rows = 1 },
+        BuiltIn = true,
+        Render = function(ctx)
+            local frame = Utils.make("Frame", {
+                Size = UDim2.new(1, 0, 0, 80),
+                BackgroundTransparency = 1,
+                BorderSizePixel = 0,
+                ZIndex = 18,
+            })
+            local count = Players and #Players:GetPlayers() or 0
+            local cap = Players and Players.MaxPlayers or 0
+            Utils.make("TextLabel", {
+                Position = UDim2.fromOffset(12, 14),
+                Size = UDim2.new(1, -24, 0, 16),
+                BackgroundTransparency = 1,
+                Text = "JOGADORES",
+                TextColor3 = Theme.Current.palette.textMuted,
+                Font = Theme.Current.typography.bold,
+                TextSize = 10,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 19,
+            }, frame)
+            Utils.make("TextLabel", {
+                Position = UDim2.fromOffset(12, 32),
+                Size = UDim2.new(1, -24, 0, 26),
+                BackgroundTransparency = 1,
+                Text = tostring(count) .. " / " .. tostring(cap),
+                TextColor3 = Theme.Current.palette.accent,
+                Font = Theme.Current.typography.bold,
+                TextSize = 20,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 19,
+            }, frame)
+            Utils.make("TextLabel", {
+                Position = UDim2.fromOffset(12, 58),
+                Size = UDim2.new(1, -24, 0, 14),
+                BackgroundTransparency = 1,
+                Text = game.Name or "Experiência",
+                TextColor3 = Theme.Current.palette.textMuted,
+                Font = Theme.Current.typography.font,
+                TextSize = 10,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 19,
+            }, frame)
+            return frame
+        end,
+    })
+
+    -- Session
+    WidgetEngine.register({
+        Id = "limui.session",
+        Title = "Sessão",
+        Description = "Duração da sessão e local da experiência.",
+        Icon = "clock",
+        DefaultSize = { Columns = 1, Rows = 1 },
+        BuiltIn = true,
+        Render = function(ctx)
+            local frame = Utils.make("Frame", {
+                Size = UDim2.new(1, 0, 0, 80),
+                BackgroundTransparency = 1,
+                BorderSizePixel = 0,
+                ZIndex = 18,
+            })
+            local start = ctx.state and ctx.state.startTime or os.clock()
+            local lbl = Utils.make("TextLabel", {
+                Position = UDim2.fromOffset(12, 14),
+                Size = UDim2.new(1, -24, 0, 18),
+                BackgroundTransparency = 1,
+                Text = "TEMPO DE SESSÃO",
+                TextColor3 = Theme.Current.palette.textMuted,
+                Font = Theme.Current.typography.bold,
+                TextSize = 10,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 19,
+            }, frame)
+            Utils.make("TextLabel", {
+                Position = UDim2.fromOffset(12, 34),
+                Size = UDim2.new(1, -24, 0, 24),
+                BackgroundTransparency = 1,
+                Text = "00:00:00",
+                TextColor3 = Theme.Current.palette.accent,
+                Font = Theme.Current.typography.bold,
+                TextSize = 18,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 19,
+            }, frame)
+            Utils.make("TextLabel", {
+                Position = UDim2.fromOffset(12, 58),
+                Size = UDim2.new(1, -24, 0, 14),
+                BackgroundTransparency = 1,
+                Text = "Place ID " .. tostring(game.PlaceId or 0),
+                TextColor3 = Theme.Current.palette.textMuted,
+                Font = Theme.Current.typography.font,
+                TextSize = 10,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 19,
+            }, frame)
+            -- One shared ticker instead of one per widget
+            ctx.onTick = function(elapsed)
+                local h = math.floor(elapsed / 3600)
+                local m = math.floor((elapsed % 3600) / 60)
+                local s = elapsed % 60
+                local value = string.format("%02d:%02d:%02d", h, m, s)
+                for _, child in ipairs(frame:GetChildren()) do
+                    if child:IsA("TextLabel") and child.TextSize == 18 then
+                        child.Text = value
+                        break
+                    end
+                end
+            end
+            return frame
+        end,
+    })
+
+    -- Theme shortcut
+    WidgetEngine.register({
+        Id = "limui.theme",
+        Title = "Tema",
+        Description = "Troca rápida entre presets de tema.",
+        Icon = "color",
+        DefaultSize = { Columns = 1, Rows = 1 },
+        BuiltIn = true,
+        Render = function(ctx)
+            local frame = Utils.make("Frame", {
+                Size = UDim2.new(1, 0, 0, 80),
+                BackgroundTransparency = 1,
+                BorderSizePixel = 0,
+                ZIndex = 18,
+            })
+            local names = {}
+            for name in pairs(Theme.Presets) do table.insert(names, name) end
+            table.sort(names)
+            local idx = 1
+            for i, n in ipairs(names) do if n == Theme.Current.name then idx = i end end
+            local label = Utils.make("TextLabel", {
+                Position = UDim2.fromOffset(12, 16),
+                Size = UDim2.new(1, -24, 0, 18),
+                BackgroundTransparency = 1,
+                Text = names[idx] or "Obsidian Glass",
+                TextColor3 = Theme.Current.palette.text,
+                Font = Theme.Current.typography.bold,
+                TextSize = 14,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 19,
+            }, frame)
+            local btn = Utils.make("TextButton", {
+                Position = UDim2.fromOffset(12, 42),
+                Size = UDim2.new(1, -24, 0, 28),
+                BackgroundColor3 = Theme.Current.palette.surface,
+                Text = "Trocar tema",
+                TextColor3 = Theme.Current.palette.text,
+                Font = Theme.Current.typography.font,
+                TextSize = 12,
+                AutoButtonColor = false,
+                BorderSizePixel = 0,
+                ZIndex = 19,
+            }, frame)
+            Utils.corner(btn, 8)
+            Utils.stroke(btn, Theme.Current.palette.border, 0.3, 1)
+            Motion.hover(btn, Theme.Current.palette.hover, Theme.Current.palette.surface)
+            btn.Activated:Connect(function()
+                idx = (idx % #names) + 1
+                label.Text = names[idx]
+                Theme.apply(names[idx])
+                Theme.propagate()
+            end)
+            return frame
+        end,
+    })
+end
+buildBuiltinWidgets()
+
+-- Register a widget definition (host API)
+function WidgetEngine.register(def)
+    if type(def) ~= "table" then return nil end
+    def.Id = def.Id or Utils.id("widget")
+    def.Title = def.Title or def.Id
+    def.Description = def.Description or ""
+    def.DefaultSize = def.DefaultSize or { Columns = 1, Rows = 1 }
+    WidgetEngine.registry[def.Id] = def
+    return def.Id
+end
+
+function WidgetEngine.get(id)
+    return WidgetEngine.registry[id]
+end
+
+function WidgetEngine.catalog()
+    local out = {}
+    for _, def in pairs(WidgetEngine.registry) do table.insert(out, def) end
+    table.sort(out, function(a, b) return a.Title < b.Title end)
+    return out
+end
+
+-- Enable the dashboard (creates a dedicated host-visible tab)
+function WidgetEngine.enable(window)
+    WidgetEngine.enabled = true
+    WidgetEngine.window = window
+    if not WidgetEngine.dashboardTab or WidgetEngine.dashboardTab.destroyed then
+        WidgetEngine.dashboardTab = window:Tab({ Id = "dashboard", Title = "Dashboard", Icon = "layout" })
+        local sec = WidgetEngine.dashboardTab:Section({ Title = "Widgets", Id = "dashboard-widgets" })
+        WidgetEngine.dashboardSection = sec
+    end
+    WidgetEngine.loadLayout()
+    WidgetEngine.renderAll()
+end
+
+function WidgetEngine.disable()
+    WidgetEngine.enabled = false
+    WidgetEngine.renderAll()
+end
+
+-- Create a widget instance on the dashboard
+function WidgetEngine.add(widgetDefId, config)
+    if not WidgetEngine.enabled then return nil end
+    local def = WidgetEngine.registry[widgetDefId]
+    if not def then return nil end
+    config = config or {}
+    local instanceId = config.Id or Utils.id("wi")
+    if WidgetEngine.instances[instanceId] then return instanceId end
+
+    local section = WidgetEngine.dashboardSection:Section({ Title = def.Title, Id = "w_" .. instanceId })
+    local ctx = {
+        id = instanceId,
+        theme = Theme.Current,
+        state = config,
+        visible = true,
+        onTick = nil,
+        destroy = function() WidgetEngine.remove(instanceId) end,
+    }
+    local node = nil
+    local ok, result = pcall(function() return def.Render and def.Render(ctx) end)
+    if ok and result then
+        node = result
+        section.container.Parent = section.container.Parent
+        -- place rendered node inside the section body
+        if node:IsA("GuiObject") then node.Parent = section.container end
+    else
+        -- error fallback: widget shows an error state instead of breaking the page
+        local err = Utils.make("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 32),
+            BackgroundTransparency = 1,
+            Text = "Widget indisponível: " .. tostring(result),
+            TextColor3 = Theme.Current.palette.error,
+            Font = Theme.Current.typography.font,
+            TextSize = 12,
+            TextWrapped = true,
+            ZIndex = 18,
+        }, section.container)
+        node = err
+    end
+
+    WidgetEngine.instances[instanceId] = {
+        def = def,
+        config = config,
+        section = section,
+        node = node,
+        ctx = ctx,
+    }
+    table.insert(WidgetEngine.order, instanceId)
+    WidgetEngine.saveLayout()
+    return instanceId
+end
+
+function WidgetEngine.remove(instanceId)
+    local w = WidgetEngine.instances[instanceId]
+    if not w then return end
+    if w.def and w.def.Destroy then pcall(w.def.Destroy, w.ctx) end
+    pcall(function() w.section:Destroy() end)
+    WidgetEngine.instances[instanceId] = nil
+    for i, id in ipairs(WidgetEngine.order) do
+        if id == instanceId then table.remove(WidgetEngine.order, i) break end
+    end
+    WidgetEngine.saveLayout()
+end
+
+function WidgetEngine.move(instanceId, direction)
+    local idx = nil
+    for i, id in ipairs(WidgetEngine.order) do if id == instanceId then idx = i break end end
+    if not idx then return false end
+    local target = idx + direction
+    if target < 1 or target > #WidgetEngine.order then return false end
+    WidgetEngine.order[idx], WidgetEngine.order[target] = WidgetEngine.order[target], WidgetEngine.order[idx]
+    WidgetEngine.renderAll()
+    WidgetEngine.saveLayout()
+    return true
+end
+
+function WidgetEngine.renderAll()
+    if not WidgetEngine.enabled then return end
+    -- Reorder existing sections to match WidgetEngine.order
+    for _, w in pairs(WidgetEngine.instances) do
+        if w.section and w.section.instance then
+            local order = 0
+            for i, id in ipairs(WidgetEngine.order) do
+                if id == w.instanceId then order = i break end
+            end
+            w.section.instance.LayoutOrder = order
+        end
+    end
+end
+
+function WidgetEngine.saveLayout()
+    Persist.write("widgets", { order = WidgetEngine.order })
+end
+
+function WidgetEngine.loadLayout()
+    local data = Persist.read("widgets")
+    if data and data.order then
+        WidgetEngine.order = data.order
+    end
+end
+
+-- Catalog picker UI (add / remove / reorder)
+function WidgetEngine.openCatalog(window)
+    window = window or WidgetEngine.window
+    if not window then return end
+    if not Overlay.topGui then Overlay.init(Host.getContainer()) end
+    local t = Theme.Current
+
+    for _, c in ipairs(Overlay.topGui:GetChildren()) do
+        if c.Name == "WidgetCatalog" then c:Destroy() end
+    end
+
+    local panel = Utils.make("Frame", {
+        Name = "WidgetCatalog",
+        Size = UDim2.fromOffset(520, 460),
+        Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundColor3 = t.palette.panel,
+        BorderSizePixel = 0,
+        ClipsDescendants = true,
+        ZIndex = 600,
+    }, Overlay.topGui)
+    Utils.corner(panel, 18)
+    Utils.stroke(panel, t.palette.border, 0.2, 1.5)
+
+    Utils.make("TextLabel", {
+        Position = UDim2.fromOffset(18, 12),
+        Size = UDim2.new(1, -70, 0, 22),
+        BackgroundTransparency = 1,
+        Text = "Catálogo de Widgets",
+        TextColor3 = t.palette.text,
+        Font = t.typography.bold,
+        TextSize = 16,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 601,
+    }, panel)
+
+    local close = Utils.make("TextButton", {
+        Position = UDim2.new(1, -10, 0, 10),
+        Size = UDim2.fromOffset(28, 28),
+        BackgroundColor3 = t.palette.surface,
+        Text = "×",
+        TextColor3 = t.palette.text,
+        Font = t.typography.bold,
+        TextSize = 18,
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 601,
+    }, panel)
+    Utils.corner(close, 8)
+    close.Activated:Connect(function() pcall(function() panel:Destroy() end) end)
+
+    local list = Utils.make("ScrollingFrame", {
+        Position = UDim2.fromOffset(16, 46),
+        Size = UDim2.new(1, -32, 1, -62),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 4,
+        ScrollBarImageColor3 = t.palette.accent,
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        CanvasSize = UDim2.new(),
+        ZIndex = 601,
+    }, panel)
+    Utils.list(list, 6)
+
+    local function refresh()
+        for _, c in ipairs(list:GetChildren()) do if c:IsA("TextButton") then c:Destroy() end end
+        for _, def in ipairs(WidgetEngine.catalog()) do
+            local added = false
+            for _, w in pairs(WidgetEngine.instances) do
+                if w.def.Id == def.Id then added = true break end
+            end
+            local row = Utils.make("TextButton", {
+                Size = UDim2.new(1, -8, 0, 44),
+                BackgroundColor3 = t.palette.surface,
+                Text = "",
+                AutoButtonColor = false,
+                BorderSizePixel = 0,
+                ZIndex = 602,
+            }, list)
+            Utils.corner(row, 10)
+            Utils.stroke(row, t.palette.border, 0.2, 1)
+            Icons.draw(row, def.Icon or "layout", 18, t.palette.accent).Position = UDim2.fromOffset(10, 13)
+            Utils.make("TextLabel", {
+                Position = UDim2.fromOffset(38, 5),
+                Size = UDim2.new(1, -120, 0, 18),
+                BackgroundTransparency = 1,
+                Text = def.Title,
+                TextColor3 = t.palette.text,
+                Font = t.typography.bold,
+                TextSize = 13,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 603,
+            }, row)
+            Utils.make("TextLabel", {
+                Position = UDim2.fromOffset(38, 23),
+                Size = UDim2.new(1, -120, 0, 14),
+                BackgroundTransparency = 1,
+                Text = def.Description,
+                TextColor3 = t.palette.textMuted,
+                Font = t.typography.font,
+                TextSize = 10,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 603,
+            }, row)
+
+            local action = Utils.make("TextButton", {
+                Position = UDim2.new(1, -76, 0, 9),
+                Size = UDim2.fromOffset(66, 26),
+                BackgroundColor3 = added and t.palette.border or t.palette.accent,
+                Text = added and "Remover" or "Adicionar",
+                TextColor3 = Color3.fromRGB(255,255,255),
+                Font = t.typography.font,
+                TextSize = 11,
+                AutoButtonColor = false,
+                BorderSizePixel = 0,
+                ZIndex = 603,
+            }, row)
+            Utils.corner(action, 7)
+            action.Activated:Connect(function()
+                if added then
+                    for id, w in pairs(WidgetEngine.instances) do
+                        if w.def.Id == def.Id then WidgetEngine.remove(id) break end
+                    end
+                else
+                    WidgetEngine.add(def.Id, {})
+                end
+                refresh()
+            end)
+        end
+    end
+    refresh()
+end
+
+--==============================================================================
+--  MODAL / DIALOG COMPONENT
+--==============================================================================
+
+function Components.Modal(parent, opts, onConfirm)
+    opts = opts or {}
+    local id = opts.Id or Utils.id("modal")
+    local title = opts.Title or opts.Name or "Modal"
+    local desc = opts.Description or ""
+    local confirmText = opts.ConfirmText or "Confirmar"
+    local cancelText = opts.CancelText or "Cancelar"
+    local callback = opts.Callback or onConfirm or function() end
+
+    local modal = Utils.make("Frame", {
+        Size = UDim2.new(0, 340, 0, 200),
+        Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundColor3 = Theme.Current.palette.panel,
+        BorderSizePixel = 0,
+        ClipsDescendants = true,
+        ZIndex = 700,
+        Visible = false,
+    }, parent)
+    Utils.corner(modal, Theme.Current.shape.radiusCard)
+    Utils.stroke(modal, Theme.Current.palette.border, 0.2, 1.5)
+
+    local tLbl = makeLabel(modal, title, UDim2.new(1, -40, 0, 24), Theme.Current.palette.text, Theme.Current.typography.bold, nil)
+    tLbl.Position = UDim2.fromOffset(20, 16)
+    local dLbl = makeLabel(modal, desc, UDim2.new(1, -40, 0, 60), Theme.Current.palette.textMuted, Theme.Current.typography.font, nil)
+    dLbl.Position = UDim2.fromOffset(20, 44)
+    Utils.set(dLbl, "TextWrapped", true)
+
+    local btnContainer = Utils.make("Frame", {
+        Position = UDim2.new(1, -10, 1, -10),
+        Size = UDim2.new(0, 200, 0, 34),
+        BackgroundTransparency = 1,
+        ZIndex = 701,
+    }, modal)
+    Utils.list(btnContainer, 10)
+    btnContainer.AnchorPoint = Vector2.new(1, 1)
+
+    local btnCancel = Utils.make("TextButton", {
+        Size = UDim2.new(0.5, -5, 0, 34),
+        BackgroundColor3 = Theme.Current.palette.surface,
+        Text = cancelText,
+        TextColor3 = Theme.Current.palette.text,
+        Font = Theme.Current.typography.font,
+        TextSize = 12,
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 702,
+    }, btnContainer)
+    Utils.corner(btnCancel, 8)
+    Utils.stroke(btnCancel, Theme.Current.palette.border, 0.3, 1)
+
+    local btnConfirm = Utils.make("TextButton", {
+        Size = UDim2.new(0.5, -5, 0, 34),
+        BackgroundColor3 = Theme.Current.palette.accent,
+        Text = confirmText,
+        TextColor3 = Color3.fromRGB(255,255,255),
+        Font = Theme.Current.typography.font,
+        TextSize = 12,
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        ZIndex = 702,
+    }, btnContainer)
+    Utils.corner(btnConfirm, 8)
+
+    local open = false
+    local handle = {
+        id = id,
+        open = function()
+            open = true
+            modal.Visible = true
+            modal.BackgroundTransparency = 1
+            Motion.animate(modal, { BackgroundTransparency = 0 }, Motion.duration("Standard"))
+        end,
+        close = function()
+            open = false
+            Motion.animate(modal, { BackgroundTransparency = 1 }, Motion.duration("Standard"), function()
+                modal.Visible = false
+            end)
+        end,
+        destroy = function()
+            pcall(function() modal:Destroy() end)
+            Control.controls[id] = nil
+        end,
+        Destroy = function() handle.destroy() end,
+    }
+
+    btnConfirm.Activated:Connect(function()
+        Utils.call(callback, true)
+        handle.close()
+    end)
+    btnCancel.Activated:Connect(function()
+        Utils.call(callback, false)
+        handle.close()
+    end)
+
+    return handle
+end
+registerComponent("Modal", Components.Modal)
+
+--==============================================================================
+--  PROGRESS COMPONENT
+--==============================================================================
+
+function Components.Progress(parent, opts)
+    opts = opts or {}
+    local id = opts.Id or Utils.id("progress")
+    local title = opts.Title or opts.Name or "Progresso"
+    local min = opts.Min or 0
+    local max = opts.Max or 100
+    local value = opts.Default or 0
+    local suffix = opts.Suffix or "%"
+
+    local container = Utils.make("Frame", {
+        Size = UDim2.new(1, 0, 0, 56),
+        BackgroundTransparency = 1,
+        ZIndex = 18,
+    }, parent)
+    Utils.list(container, 6)
+
+    local tLbl = makeLabel(container, title, UDim2.new(1, 0, 0, 16), Theme.Current.palette.text, nil, nil)
+    local pLbl = makeLabel(container, tostring(value) .. suffix, UDim2.new(1, 0, 0, 14), Theme.Current.palette.textMuted, nil, Enum.TextXAlignment.Right)
+
+    local track = Utils.make("Frame", {
+        Size = UDim2.new(1, 0, 0, 8),
+        BackgroundColor3 = Theme.Current.palette.border,
+        BorderSizePixel = 0,
+        ZIndex = 18,
+    }, container)
+    Utils.corner(track, 4)
+
+    local fill = Utils.make("Frame", {
+        Size = UDim2.new((value - min) / (max - min), 0, 1, 0),
+        BackgroundColor3 = Theme.Current.palette.accent,
+        BorderSizePixel = 0,
+        ZIndex = 19,
+    }, track)
+    Utils.corner(fill, 4)
+
+    local handle = Control.new(id, "progress", container, function() return value end, function(v)
+        value = math.clamp(v, min, max)
+        local pct = (value - min) / (max - min)
+        Utils.set(fill, "Size", UDim2.new(pct, 0, 1, 0))
+        Utils.set(pLbl, "Text", tostring(value) .. suffix)
+    end, opts)
+    handle.setValue = function(v, silent)
+        value = math.clamp(v, min, max)
+        local pct = (value - min) / (max - min)
+        Utils.set(fill, "Size", UDim2.new(pct, 0, 1, 0))
+        Utils.set(pLbl, "Text", tostring(value) .. suffix)
+        return handle
+    end
+    handle.getValue = function() return value end
+    handle.destroy = function() Control.destroy(handle) end
+    handle.Destroy = handle.destroy
+    return handle
+end
+registerComponent("Progress", Components.Progress)
+
+--==============================================================================
+--  TEXTAREA COMPONENT
+--==============================================================================
+
+function Components.TextArea(parent, opts, onChanged)
+    opts = opts or {}
+    local id = opts.Id or Utils.id("textarea")
+    local title = opts.Title or opts.Name or "Área de texto"
+    local placeholder = opts.Placeholder or "Digite aqui..."
+    local default = opts.Default or ""
+    local callback = opts.Callback or onChanged or function() end
+
+    local container = Utils.make("Frame", {
+        Size = UDim2.new(1, 0, 0, 100),
+        BackgroundTransparency = 1,
+        ZIndex = 18,
+    }, parent)
+    Utils.list(container, 6)
+
+    if title and title ~= "" then
+        makeLabel(container, title, UDim2.new(1, 0, 0, 16), Theme.Current.palette.text, nil, nil)
+    end
+
+    local box = Utils.make("TextBox", {
+        Size = UDim2.new(1, 0, 0, 80),
+        BackgroundColor3 = Theme.Current.palette.surface,
+        Text = default,
+        PlaceholderText = placeholder,
+        PlaceholderColor3 = Theme.Current.palette.placeholder,
+        TextColor3 = Theme.Current.palette.text,
+        Font = Theme.Current.typography.font,
+        TextSize = 13,
+        ClearTextOnFocus = false,
+        BorderSizePixel = 0,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        ZIndex = 18,
+    }, container)
+    Utils.corner(box, Theme.Current.shape.radiusButton)
+    Utils.stroke(box, Theme.Current.palette.border, 0.3, 1)
+    Utils.pad(box, 8, 10, 8, 10)
+
+    box.FocusLost:Connect(function(enter)
+        Utils.call(callback, box.Text)
+    end)
+
+    local handle = Control.new(id, "textarea", box, function() return box.Text end, function(v)
+        box.Text = tostring(v or "")
+    end, opts)
+    handle.setValue = function(v, silent)
+        box.Text = tostring(v or "")
+        if not silent then Utils.call(callback, box.Text) end
+        return handle
+    end
+    handle.getValue = function() return box.Text end
+    handle.setDisabled = function(d) Utils.set(box, "Editable", not d) end
+    handle.setVisible = function(v) Control.setVisible(handle, v) end
+    handle.focus = function() box:CaptureFocus() end
+    handle.destroy = function() Control.destroy(handle) end
+    handle.Destroy = handle.destroy
+    return handle
+end
+registerComponent("TextArea", Components.TextArea)
+
+--==============================================================================
+--  MULTISELECT COMPONENT
+--==============================================================================
+
+function Components.MultiSelect(parent, opts, onChanged)
+    opts = opts or {}
+    local id = opts.Id or Utils.id("multiselect")
+    local title = opts.Title or opts.Name or "Múltipla seleção"
+    local options = opts.Options or {}
+    local defaults = opts.Default or {}
+    local max = opts.Max or #options
+    local callback = opts.Callback or onChanged or function() end
+
+    local selected = {}
+    for _, v in ipairs(defaults) do selected[v] = true end
+
+    local container = Utils.make("Frame", {
+        Size = UDim2.new(1, 0, 0, 42 + #options * 26),
+        BackgroundTransparency = 1,
+        ZIndex = 18,
+    }, parent)
+    Utils.list(container, 6)
+
+    local tLbl = makeLabel(container, title, UDim2.new(1, 0, 0, 16), Theme.Current.palette.text, nil, nil)
+
+    local handle = {
+        id = id,
+        setValue = function(v, silent)
+            selected = {}
+            for _, val in ipairs(v or {}) do selected[val] = true end
+            rebuild()
+            if not silent then Utils.call(callback, getSelectedIds()) end
+            return handle
+        end,
+        getValue = function() return getSelectedIds() end,
+        setDisabled = function(d) Control.setDisabled(handle, d) end,
+        setVisible = function(v) Control.setVisible(handle, v) end,
+        destroy = function() Control.destroy(handle) end,
+        Destroy = function() handle.destroy() end,
+    }
+
+    function getSelectedIds()
+        local ids = {}
+        for k, v in pairs(selected) do if v then table.insert(ids, k) end end
+        return ids
+    end
+
+    function rebuild()
+        for _, c in ipairs(container:GetChildren()) do
+            if c:IsA("TextButton") then c:Destroy() end
+        end
+        for _, opt in ipairs(options) do
+            local oid = opt.Id or opt or tostring(#options)
+            local olabel = opt.Label or opt or tostring(oid)
+            local btn = Utils.make("TextButton", {
+                Size = UDim2.new(1, 0, 0, 24),
+                BackgroundColor3 = selected[oid] and Theme.Current.palette.accent or Theme.Current.palette.surface,
+                Text = olabel,
+                TextColor3 = selected[oid] and Color3.fromRGB(255,255,255) or Theme.Current.palette.text,
+                Font = Theme.Current.typography.font,
+                TextSize = 12,
+                AutoButtonColor = false,
+                BorderSizePixel = 0,
+                ZIndex = 19,
+            }, container)
+            Utils.corner(btn, 6)
+            Utils.stroke(btn, Theme.Current.palette.border, 0.2, 1)
+            btn.Activated:Connect(function()
+                selected[oid] = not selected[oid]
+                Utils.set(btn, "BackgroundColor3", selected[oid] and Theme.Current.palette.accent or Theme.Current.palette.surface)
+                Utils.call(callback, getSelectedIds())
+            end)
+        end
+    end
+    rebuild()
+
+    Control.controls[id] = handle
+    return handle
+end
+registerComponent("MultiSelect", Components.MultiSelect)
+
+--==============================================================================
+--  PUBLIC API FACADE (complete)
+--==============================================================================
+
+function limui:Window(opts)
+    return Window.new(opts or {})
+end
+
+function limui:GetWindow(id)
+    return WindowMgr.get(id)
+end
+
+function limui:GetVersion()
+    return limui.Version
+end
+
+function limui:GetCapabilities()
+    return Capabilities
+end
+
+function limui:SetTheme(theme)
+    Theme.apply(theme)
+end
+
+function limui:SetQuality(level)
+    Theme.Quality = level
+end
+
+function limui:SetMotion(preset)
+    Theme.Motion = preset
+end
+
+function limui:Notify(opts)
+    return Notify.create(opts)
+end
+
+function limui:DestroyAll()
+    WindowMgr.destroyAll()
+    Motion.cancelAll()
+end
+
+-- Expose subsystems
+limui.Components = Components
+limui.Search = Search
+limui.Search.register = Search.register
+limui.Theme = Theme
+limui.Motion = Motion
+limui.Control = Control
+limui.Favorites = Favorites
+limui.WidgetEngine = WidgetEngine
+limui.Tooltip = TooltipSystem
+limui.ContextMenu = ContextMenu
+
+return limui
